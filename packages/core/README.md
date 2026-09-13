@@ -494,11 +494,11 @@ export default defineUniPages({
 })
 ```
 
-修改 `theme` 或它静态导入的本地配置时，插件重新加载配置、生成 `pages.json` 和声明文件，再通知 HMR。导入关系变化后会更新依赖集合，已移除的依赖不再触发生成。H5 开发服务器和小程序 `build --watch` 使用同样的流程。
+修改 `theme` 或它静态导入的本地配置时，插件重新加载配置、生成 `pages.json` 和声明文件，再通知 HMR。目录导入用于选择入口的 `package.json` 也参与监听。导入关系变化后会更新依赖集合，已移除的依赖不再触发生成。H5 开发服务器和小程序 `build --watch` 使用同样的流程。
 
 配置加载失败时保留已有产物，并监听已发现的本地依赖及缺失导入的候选路径。补建文件或修正依赖后会自动重试，成功后再更新依赖集合。
 
-默认模块加载通过 esbuild 在内存中打包本地依赖，再由 Jiti 执行，不生成临时 bundle 文件。unconfig 继续负责配置来源发现、优先级、`rewrite` 与自定义解析规则；支持默认导出、命名导出和 CommonJS，保留配置文件及本地依赖的 `__filename`、`__dirname`、`import.meta.url` 上下文。
+默认模块加载通过 esbuild 在内存中打包本地依赖，再由 Jiti 执行，不生成临时 bundle 文件。unconfig 继续负责配置来源发现、优先级、`rewrite` 与自定义解析规则；支持默认导出、命名导出和 CommonJS，保留配置文件及本地依赖的 `__filename`、`__dirname`、`import.meta.url` 上下文。包引用按实际导入文件的位置解析，并保留 `import` 与 `require` 对应的导出条件。
 
 依赖收集覆盖可静态解析的本地导入。`node_modules` 包、动态计算的文件路径和直接文件系统读取不在此范围内；配置加载不继承应用的 Vite alias 或 tsconfig paths。自定义 `parser`、`transform` 继续按 unconfig 的规则执行。
 
@@ -618,6 +618,8 @@ export default defineConfig(async () => {
 index.ts          Vite 插件入口 — prepare / configResolved / transform / configureServer / resolveId / load
 preparation.ts    准备快照 — 输入与产物校验、失败恢复
 config-loader.ts  配置加载 — 内存打包、本地依赖收集、unconfig 来源语义
+config-resolve.ts 外部依赖解析 — 导入位置与 import / require 导出条件
+config-scope.ts   配置文件作用域 — 运行期 require 与 import.meta.resolve
 context.ts        PageContext 编排核心 — 配置加载、扫描、合并、监听、虚拟模块与 HMR
 pipeline.ts       纯流水线入口 — createPages / generateAll，root 和 platform 从外部传入，测试直接走这里
 pages-json.ts     pages.json 读-改-写 — 多平台 #ifdef 合并、首页排前、

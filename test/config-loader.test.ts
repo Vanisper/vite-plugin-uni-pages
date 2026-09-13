@@ -38,6 +38,60 @@ describe('pages config loading', () => {
     expect(await load()).toEqual({ config: config('title'), sources: [source], dependencies: [dependency] })
   })
 
+  it.each(['require.resolve', 'dynamic require', 'package import'])('preserves the importing file context for %s', async (kind) => {
+    write('pages.config.ts', 'import title from "./config/theme.cjs"; export default { pages: [], globalStyle: { navigationBarTitleText: title } }')
+    write('config/data.json', '{"title":"local"}')
+    write('config/node_modules/config-value/package.json', '{"main":"index.cjs"}')
+    write('config/node_modules/config-value/index.cjs', 'module.exports = "package local"')
+    write('config/theme.cjs', kind === 'require.resolve'
+      ? 'module.exports = require("node:path").basename(require.resolve("./data.json"))'
+      : kind === 'dynamic require'
+        ? 'const file = "./data.json"; module.exports = require(file).title'
+        : 'module.exports = require("config-value")')
+
+    expect((await load()).config).toEqual(config(kind === 'require.resolve' ? 'data.json' : kind === 'dynamic require' ? 'local' : 'package local'))
+  })
+
+  it('preserves runtime TypeScript resolution, require aliases and local bindings', async () => {
+    write('config/title.ts', 'export const title = "runtime"')
+    write('config/theme.cjs', `
+      const file = './title'
+      const load = require
+      const { require: shorthand } = { require }
+      function shadowed(require) { return require(file) }
+      function hoisted() { var require = () => 'hoisted'; return require(file) }
+      const object = { method(require) { return require(file) } }
+      module.exports = [load(file).title, shorthand(file).title, shadowed(() => 'parameter'), hoisted(), object.method(() => 'method')].join('|')
+    `)
+    write('pages.config.ts', 'import title from "./config/theme.cjs"; export default { globalStyle: { navigationBarTitleText: title } }')
+    expect((await load()).config.globalStyle?.navigationBarTitleText).toBe('runtime|runtime|parameter|hoisted|method')
+  })
+
+  it('preserves file-local import.meta.resolve', async () => {
+    write('config/title.ts', 'export default "value"')
+    const helper = write('config/theme.ts', 'export default import.meta.resolve("./title.ts")')
+    write('pages.config.ts', 'import title from "./config/theme"; export default { globalStyle: { navigationBarTitleText: title } }')
+    expect((await load()).config.globalStyle?.navigationBarTitleText).toBe(pathToFileURL(fs.realpathSync(path.join(path.dirname(helper), 'title.ts'))).href)
+  })
+
+  it('keeps injected runtime resolution independent of a top-level require binding', async () => {
+    const target = write('config/title.ts', 'export default "value"')
+    write('config/theme.ts', 'const require = () => "local"; export default { title: import.meta.resolve("./title.ts"), local: require() }')
+    write('pages.config.ts', 'import theme from "./config/theme"; export default { globalStyle: { navigationBarTitleText: theme.title }, local: theme.local }')
+    expect((await load()).config).toEqual({
+      globalStyle: { navigationBarTitleText: pathToFileURL(fs.realpathSync(target)).href },
+      local: 'local',
+    })
+  })
+
+  it('preserves CommonJS cycles and asynchronous ESM dependencies', async () => {
+    write('config/a.cjs', 'exports.name = "a"; const b = require("./b.cjs"); exports.title = exports.name + b.title')
+    write('config/b.cjs', 'exports.title = "b" + require("./a.cjs").name')
+    write('config/async.mts', 'export const title = await Promise.resolve("async")')
+    write('pages.config.ts', 'import cjs from "./config/a.cjs"; import { title } from "./config/async.mts"; export default { globalStyle: { navigationBarTitleText: cjs.title + title } }')
+    expect((await load()).config.globalStyle?.navigationBarTitleText).toBe('abaasync')
+  })
+
   it('preserves named-only exports', async () => {
     write('pages.config.ts', 'export const pages = []; export const globalStyle = { navigationBarTitleText: "named" }')
     expect((await load()).config).toEqual(config('named'))

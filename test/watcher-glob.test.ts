@@ -144,6 +144,62 @@ describe('glob directory watchers', () => {
     expect(scope.ignored(path.join(root, 'src/pages-other'))).toBe(true)
   })
 
+  it('prunes unrelated package trees while preserving explicitly imported configuration files', async () => {
+    const root = project()
+    for (const file of [
+      'src/packages/demo/pages/index.vue',
+      'src/packages/demo/pages/components/Card.vue',
+      'src/packages/demo/pages/components/theme.ts',
+      'src/packages/demo/node_modules/vendor/index.js',
+      'src/packages/demo/node_modules/config/theme.ts',
+      'src/packages/demo/docs/readme.md',
+    ]) {
+      writeFile(root, file)
+    }
+    const ctx = new PageContext({
+      subPackages: ['src/packages/*/pages'],
+      exclude: ['**/components/**'],
+      dts: false,
+    }, root, 'h5')
+    ctx.pagesConfigDependencyPaths = [
+      path.join(root, 'src/packages/demo/node_modules/config/theme.ts'),
+      path.join(root, 'src/packages/demo/pages/components/theme.ts'),
+    ]
+    const scope = watchScope(ctx)
+    const watcher = chokidar.watch(scope.roots, { ignored: scope.ignored, ignoreInitial: true })
+    cleanups.push(() => watcher.close())
+    await once(watcher, 'ready')
+
+    const watched = Object.fromEntries(Object.entries(watcher.getWatched())
+      .map(([directory, files]) => [path.relative(root, directory).replaceAll('\\', '/'), files]))
+    expect(watched['src/packages/demo/docs']).toBeUndefined()
+    expect(watched['src/packages/demo/node_modules/vendor']).toBeUndefined()
+    expect(watched['src/packages/demo/node_modules/config']).toEqual(['theme.ts'])
+    expect(watched['src/packages/demo/pages/components']).toEqual(['theme.ts'])
+    expect(watched['src/packages/demo/pages']).toContain('index.vue')
+  })
+
+  it.each([
+    'src/packages/**/pages',
+    'src/{packages,features}/*/pages',
+    'src/packages/+(demo|other)/pages',
+    'src/{packages/demo,features/demo}/pages',
+  ])('keeps newly created directories reachable for %s', async (pattern) => {
+    const root = project()
+    const ctx = new PageContext({ subPackages: [pattern], dts: false }, root, 'h5')
+    await ctx.updatePagesJSON()
+    const scope = watchScope(ctx)
+    const watcher = chokidar.watch(scope.roots, { ignored: scope.ignored, ignoreInitial: true })
+    await startWatcher(ctx, watcher)
+
+    writeFile(root, 'src/packages/demo/pages/index.vue')
+    await expect.poll(() => {
+      const output = readPages(root)
+      return output.subPackages?.flatMap(subPackage => subPackage.pages.map(page =>
+        path.resolve(root, ctx.options.outDir, subPackage.root, `${page.path}.vue`)))
+    }, { timeout: 5_000 }).toEqual([path.join(root, 'src/packages/demo/pages/index.vue')])
+  }, 10_000)
+
   it('treats project roots and configuration filenames as literal paths', async () => {
     const root = project('app[demo]')
     writeFile(root, 'theme[dark].ts', 'export const title = "Before"')
@@ -206,7 +262,13 @@ describe('glob directory watchers', () => {
     writeFile(root, '../shared/demo/pages/index.vue')
     watcher.emit('all', 'addDir', path.join(root, '../shared/demo'))
     await state.flush()
-    expect(routes(root)).toEqual(['/features/shared/index', '/pages/index'])
+    const output = readPages(root)
+    expect(output.subPackages).toHaveLength(1)
+    const subPackage = output.subPackages![0]
+    expect(subPackage.pages).toHaveLength(1)
+    const source = path.resolve(root, ctx.options.outDir, subPackage.root, `${subPackage.pages[0].path}.vue`)
+    expect(source).toBe(path.resolve(root, '../shared/demo/pages/index.vue'))
+    expect(fs.existsSync(source)).toBe(true)
   })
 
   it('subscribes to recovery dependencies after generation fails', async () => {

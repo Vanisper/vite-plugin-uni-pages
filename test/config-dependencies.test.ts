@@ -1,13 +1,15 @@
 import type { PagesConfig } from '@uni-helper/uni-pages-types'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import chokidar from 'chokidar'
 import { parse } from 'comment-json'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadPagesConfig, PageConfigLoadError } from '../packages/core/src/config-loader'
 import { PageContext } from '../packages/core/src/context'
 import { assertPreparedContext, prepareContext } from '../packages/core/src/preparation'
+import { watchScope } from '../packages/core/src/scan'
 
 describe('pages config dependencies', () => {
   let root: string
@@ -75,6 +77,63 @@ describe('pages config dependencies', () => {
     expect(loaded.config.globalStyle?.navigationBarTitleText).toBe('5|6|7|8')
   })
 
+  it('keeps file resolution ahead of an unrelated directory with the same name', async () => {
+    write('pages.config.ts', 'import title from "./config"; export default { globalStyle: { navigationBarTitleText: title } }')
+    const dependency = write('config.ts', 'export default "file"')
+    write('config/package.json', '{"main":')
+    const loaded = await load()
+    expect(loaded.config.globalStyle?.navigationBarTitleText).toBe('file')
+    expect(loaded.dependencies).toEqual([dependency])
+  })
+
+  it('tracks the local package manifest that selects a directory import entry', async () => {
+    write('pages.config.ts', 'import title from "./config"; export default { globalStyle: { navigationBarTitleText: title } }')
+    write('config/a.ts', 'export default "A"')
+    const alternate = write('config/b.ts', 'export default "B"')
+    const manifest = write('config/package.json', '{"main":"a.ts"}')
+    const first = await load()
+    expect(first.config.globalStyle?.navigationBarTitleText).toBe('A')
+    expect(first.dependencies).toContain(manifest)
+    write('config/package.json', '{"main":"b.ts"}')
+    const second = await load()
+    expect(second.config.globalStyle?.navigationBarTitleText).toBe('B')
+    expect(second.dependencies.sort()).toEqual([alternate, manifest].sort())
+  })
+
+  it.each(['change', 'add'])('updates directory import entries through a native watcher on manifest %s', async (event) => {
+    fs.mkdirSync(path.join(root, 'src'))
+    write('pages.config.ts', 'import title from "./config"; export default { pages: [{ path: "pages/index" }], globalStyle: { navigationBarTitleText: title } }')
+    const initial = event === 'change' ? 'config/a.ts' : 'config/index.ts'
+    write(initial, 'export default "A"')
+    write('config/b.ts', 'export default "B"')
+    if (event === 'change')
+      write('config/package.json', '{"main":"a.ts"}')
+    const ctx = new PageContext({ mergePages: false, dts: false }, root, 'mp-weixin')
+    await ctx.updatePagesJSON()
+    const scope = watchScope(ctx)
+    const watcher = chokidar.watch(scope.roots, { ignoreInitial: true, ignored: scope.ignored })
+    const onUpdate = vi.spyOn(ctx, 'onUpdate')
+    const readTitle = () => (parse(fs.readFileSync(path.join(root, 'src/pages.json'), 'utf8')) as PagesConfig).globalStyle?.navigationBarTitleText
+    try {
+      await once(watcher, 'ready')
+      await ctx.setupWatcher(watcher)
+      let revision = 0
+      await expect.poll(() => {
+        if (onUpdate.mock.calls.length)
+          return true
+        write(initial, `export default "Ready ${revision++}"`)
+        return false
+      }, { interval: 50, timeout: 5_000 }).toBe(true)
+      await ctx.flushWatcher()
+      write('config/package.json', '{"main":"b.ts"}')
+      await expect.poll(readTitle, { timeout: 5_000 }).toBe('B')
+    }
+    finally {
+      await ctx.disposeWatcher()
+      await watcher.close()
+    }
+  })
+
   it('keeps dependencies under a symlinked directory on the paths seen by the watcher', async () => {
     write('actual/theme.ts', 'export const title = "linked"')
     fs.symlinkSync(path.join(root, 'actual'), path.join(root, 'linked'), 'junction')
@@ -98,7 +157,7 @@ describe('pages config dependencies', () => {
     expect(fs.readdirSync(root, { recursive: true }).sort()).toEqual(files)
   })
 
-  it.each(['missing file', 'syntax error', 'missing index'])('recovers from a newly imported dependency with %s without touching the config again', async (failure) => {
+  it.each(['missing file', 'syntax error', 'missing index', 'missing package entry', 'invalid package manifest'])('recovers from a newly imported dependency with %s without touching the config again', async (failure) => {
     fs.mkdirSync(path.join(root, 'src'))
     const configSource = (specifier: string) => `import { title } from ${JSON.stringify(specifier)}; export default { pages: [{ path: "pages/index" }], globalStyle: { navigationBarTitleText: title } }`
     const source = write('pages.config.ts', configSource('./initial'))
@@ -107,7 +166,7 @@ describe('pages config dependencies', () => {
     const watcher = Object.assign(new EventEmitter(), { add: vi.fn() })
     const onUpdate = vi.spyOn(ctx, 'onUpdate').mockImplementation(() => {})
     const readOutput = () => fs.readFileSync(path.join(root, 'src/pages.json'), 'utf8')
-    const target = failure === 'missing index' ? 'new/title/index.ts' : 'new/title.ts'
+    const target = failure === 'missing index' ? 'new/title/index.ts' : failure.includes('package') ? 'new/title/content.ts' : 'new/title.ts'
     const absoluteTarget = path.join(root, target).replace(/\\/g, '/')
 
     try {
@@ -116,6 +175,12 @@ describe('pages config dependencies', () => {
       const original = readOutput()
       write('pages.config.ts', configSource('./new/theme'))
       write('new/theme.ts', 'export { title } from "./title"')
+      if (failure === 'missing package entry')
+        write('new/title/package.json', '{"main":"content.ts"}')
+      if (failure === 'invalid package manifest') {
+        write('new/title/package.json', '{"main":')
+        write(target, 'export const title = "recovered"')
+      }
       if (failure === 'syntax error')
         write(target, 'export const title =')
       const files = fs.readdirSync(root, { recursive: true }).sort()
@@ -124,18 +189,22 @@ describe('pages config dependencies', () => {
       await ctx.flushWatcher()
       expect(onUpdate).not.toHaveBeenCalled()
       expect(readOutput()).toBe(original)
-      expect(ctx.pagesConfigDependencyPaths).toContain(absoluteTarget)
-      expect(watcher.add).toHaveBeenLastCalledWith(expect.arrayContaining([absoluteTarget]))
+      const recoveryPath = failure === 'invalid package manifest' ? path.join(root, 'new/title/package.json').replace(/\\/g, '/') : absoluteTarget
+      expect(ctx.pagesConfigDependencyPaths).toContain(recoveryPath)
+      expect(watcher.add).toHaveBeenLastCalledWith(expect.arrayContaining([recoveryPath]))
       expect(fs.readdirSync(root, { recursive: true }).sort()).toEqual(files)
 
       write(target, 'export const title = "recovered"')
-      watcher.emit('all', failure === 'syntax error' ? 'change' : 'add', absoluteTarget)
+      if (failure === 'invalid package manifest')
+        write('new/title/package.json', '{"main":"content.ts"}')
+      watcher.emit('all', failure === 'syntax error' || failure === 'invalid package manifest' ? 'change' : 'add', recoveryPath)
       await ctx.flushWatcher()
       expect(onUpdate).toHaveBeenCalledTimes(1)
       expect((parse(readOutput()) as PagesConfig).globalStyle?.navigationBarTitleText).toBe('recovered')
       expect(ctx.pagesConfigDependencyPaths.sort()).toEqual([
         path.join(root, 'new/theme.ts').replace(/\\/g, '/'),
         absoluteTarget,
+        ...(failure === 'missing index' || failure.includes('package') ? [path.join(root, 'new/title/package.json').replace(/\\/g, '/')] : []),
       ].sort())
 
       const loads = vi.spyOn(ctx, 'loadUserPagesConfig')

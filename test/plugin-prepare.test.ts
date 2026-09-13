@@ -243,6 +243,34 @@ describe('插件提前准备', () => {
     expect(fs.existsSync(path.join(root, 'src/pages/late.vue'))).toBe(true)
   })
 
+  it('配置执行期间依赖变化会拒绝准备结果并保留既有产物', async () => {
+    writeFile('src/pages.json', '{"pages":[{"path":"pages/previous"}]}')
+    writeFile('src/routes.d.ts', '// previous declaration')
+    writeFile('theme.ts', 'export const title = "before"')
+    writeFile('pages.config.mjs', `
+      import { existsSync, writeFileSync } from 'node:fs'
+      import { title } from './theme.ts'
+      writeFileSync(new URL('./config-loaded', import.meta.url), '')
+      while (!existsSync(new URL('./config-release', import.meta.url)))
+        await new Promise(resolve => setTimeout(resolve, 5))
+      export default { globalStyle: { navigationBarTitleText: title } }
+    `)
+    const original = readOutputs()
+    const plugin = createPlugin()
+    const result = plugin.prepare().then(() => undefined, error => error)
+    try {
+      await expect.poll(() => fs.existsSync(path.join(root, 'config-loaded')), { timeout: 3_000 }).toBe(true)
+      writeFile('theme.ts', 'export const title = "after"')
+    }
+    finally {
+      writeFile('config-release', '')
+      await result
+    }
+    expect(await result).toBeInstanceOf(Error)
+    expect((await result as Error).message).toMatch(/changed/)
+    expect(readOutputs()).toEqual(original)
+  })
+
   it('准备期间产物被外部改写会拒绝结果并保留该修改', async () => {
     writeFile('src/pages.json', '{"pages":[{"path":"pages/previous"}]}')
     writeFile('src/routes.d.ts', '// previous declaration')

@@ -43,6 +43,8 @@ export class PageContext {
   private _server: ViteDevServer | undefined
   private pageWatcher: PageWatcher | undefined
   private generationQueue: Promise<unknown> = Promise.resolve()
+  /** 部分产物写入失败时，保留更新直到完整生成成功 */
+  private pendingUpdate = false
 
   /** 用于重新发现页面目录的原始扫描规则 */
   readonly scanOptions: ScanOptions
@@ -229,7 +231,7 @@ export class PageContext {
    * 5. 生成并写入 pages.json
    * @param filepath - 发生变更的文件路径，用于增量更新判断
    * @param observer - 接收配置加载与产物完成通知；回调抛错时本次生成失败
-   * @returns pages.json 是否成功更新
+   * @returns 完整生成成功后，是否存在尚未报告的 pages.json 更新
    */
   updatePagesJSON(filepath?: string, observer?: GenerationObserver): Promise<boolean> {
     const task = this.generationQueue.catch(() => {}).then(() => this.generatePagesJSON(filepath, observer))
@@ -242,7 +244,7 @@ export class PageContext {
       const page = this.findPage(filepath)
       if (page) {
         await page.read()
-        if (!page.hasChanged()) {
+        if (!page.hasChanged() && !this.pendingUpdate) {
           debug.cache(`The page meta on page ${filepath} did not send any changes, skipping`)
           return false
         }
@@ -313,6 +315,7 @@ export class PageContext {
         insertFinalNewline: this.options.insertFinalNewline,
       },
     })
+    this.pendingUpdate ||= result?.updated ?? false
 
     // 声明文件写的是另一个文件（uni-pages.d.ts），不需要和 pages.json
     // 用同一把锁。保持原有行为：不管内容变没变，都在 pages.json 计算
@@ -328,7 +331,12 @@ export class PageContext {
       this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
     }
 
-    return result?.updated ?? false
+    if (!result)
+      return false
+
+    const updated = this.pendingUpdate
+    this.pendingUpdate = false
+    return updated
   }
 
   /**
