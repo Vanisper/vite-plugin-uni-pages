@@ -480,6 +480,28 @@ const pages = UniPages({
 
 这保证了 uni-pages 产物的更新；如果其他插件只在初始化时读取分包结构，它们仍可能需要重启。
 
+### 配置依赖热更新
+
+`pages.config.ts` 导入的本地 TS、JS、CJS 和 JSON 文件也会参与监听，包括间接依赖：
+
+```ts
+// pages.config.ts
+import { defineUniPages } from '@uni-helper/vite-plugin-uni-pages'
+import { theme } from './src/configs/theme'
+
+export default defineUniPages({
+  globalStyle: { navigationBarBackgroundColor: theme.background },
+})
+```
+
+修改 `theme` 或它静态导入的本地配置时，插件重新加载配置、生成 `pages.json` 和声明文件，再通知 HMR。导入关系变化后会更新依赖集合，已移除的依赖不再触发生成。H5 开发服务器和小程序 `build --watch` 使用同样的流程。
+
+配置加载失败时保留已有产物，并监听已发现的本地依赖及缺失导入的候选路径。补建文件或修正依赖后会自动重试，成功后再更新依赖集合。
+
+默认模块加载通过 esbuild 在内存中打包本地依赖，再由 Jiti 执行，不生成临时 bundle 文件。unconfig 继续负责配置来源发现、优先级、`rewrite` 与自定义解析规则；支持默认导出、命名导出和 CommonJS，保留配置文件及本地依赖的 `__filename`、`__dirname`、`import.meta.url` 上下文。
+
+依赖收集覆盖可静态解析的本地导入。`node_modules` 包、动态计算的文件路径和直接文件系统读取不在此范围内；配置加载不继承应用的 Vite alias 或 tsconfig paths。自定义 `parser`、`transform` 继续按 unconfig 的规则执行。
+
 ### 提前生成完整页面配置
 
 某些插件在工厂函数执行时就读取 `pages.json`，仅调整 Vite 插件顺序不足以让它们读到完整配置。这时可以在创建这些插件前调用 `prepare()`：
@@ -595,6 +617,7 @@ export default defineConfig(async () => {
 ```
 index.ts          Vite 插件入口 — prepare / configResolved / transform / configureServer / resolveId / load
 preparation.ts    准备快照 — 输入与产物校验、失败恢复
+config-loader.ts  配置加载 — 内存打包、本地依赖收集、unconfig 来源语义
 context.ts        PageContext 编排核心 — 配置加载、扫描、合并、监听、虚拟模块与 HMR
 pipeline.ts       纯流水线入口 — createPages / generateAll，root 和 platform 从外部传入，测试直接走这里
 pages-json.ts     pages.json 读-改-写 — 多平台 #ifdef 合并、首页排前、
@@ -634,7 +657,7 @@ pipeline.ts ── context.ts             测试与外部调用的流水线入�
 1. **插件工厂调用**（同步）— 预检 `pages.json` 是否存在且合法（此时 `config.root` 未知，回退到 `VITE_ROOT_DIR` / `process.cwd()` 解析路径）
 2. **`prepare()`**（可选）— 在下游插件工厂之前生成完整产物并保存输入快照
 3. **`configResolved`**（异步）— 创建 `PageContext` 并生成产物，或校验并接管已准备的上下文；`build --watch` 模式下另建 chokidar 监听扫描规则的稳定祖先
-4. **`configureServer`**（dev）— 复用 Vite 的 `server.watcher`，把配置文件源（`pages.config.ts` 等）加入监听；变更时重跑完整流水线，失效虚拟模块并通知浏览器 full-reload
+4. **`configureServer`**（dev）— 复用 Vite 的 `server.watcher`，把配置文件源（`pages.config.ts` 等）及其本地导入依赖加入监听；变更时重跑完整流水线，失效虚拟模块并通知浏览器 full-reload
 5. **`transform`** — 从 vue / nvue / uvue 文件中移除 `definePage` 宏调用，避免运行时报错
 6. **`resolveId` / `load`** — 提供 `virtual:uni-pages` 虚拟模块，暴露所有页面元数据
 

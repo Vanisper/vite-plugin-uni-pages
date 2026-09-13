@@ -11,8 +11,8 @@ import { platform as uniEnvPlatform } from '@uni-helper/uni-env'
 import { stringify as cjStringify } from 'comment-json'
 import dbg from 'debug'
 import groupBy from 'lodash.groupby'
-import { loadConfig } from 'unconfig'
 import { normalizePath } from 'vite'
+import { loadPagesConfig, PageConfigLoadError } from './config-loader'
 import { RESOLVED_MODULE_ID_VIRTUAL } from './constant'
 import { writeDeclaration } from './declaration'
 import { checkPagesJsonFileSync, getPageFiles, resolvePagesJsonPath } from './files'
@@ -51,7 +51,7 @@ export class PageContext {
   pagesGlobConfig: PagesConfig | undefined
   /** 用户配置文件的来源路径列表 */
   pagesConfigSourcePaths: string[] = []
-  /** 最近一次成功加载的配置依赖路径 */
+  /** 配置加载与失败恢复需要监听的本地依赖路径 */
   pagesConfigDependencyPaths: string[] = []
 
   /** 主包页面映射，键为页面文件的绝对路径 */
@@ -128,14 +128,25 @@ export class PageContext {
    * 使用 unconfig 加载配置，支持多种配置文件格式
    */
   async loadUserPagesConfig(): Promise<void> {
-    const configSource = this.options.configSource
-    const { config, sources, dependencies } = await loadConfig<PagesConfig>({ cwd: this.root, sources: configSource, defaults: {} })
-    this.pagesGlobConfig = config.default || config
-    // 归一化斜杠：watcher 的事件回调里也归一化，两边比较才对得上
-    // （Windows 上 unconfig 和 chokidar 报的斜杠方向可能不一致）
-    this.pagesConfigSourcePaths = sources.map(normalizePath)
-    this.pagesConfigDependencyPaths = (dependencies ?? []).map(normalizePath)
-    debug.options(this.pagesGlobConfig)
+    const isDependency = (file: string): boolean => !this.pagesConfigSourcePaths.includes(file)
+      && file !== this.resolvedPagesJSONPath && file !== this.options.dts
+
+    try {
+      const { config, sources, dependencies } = await loadPagesConfig(this.root, this.options.configSource)
+      this.pagesGlobConfig = config
+      this.pagesConfigSourcePaths = sources
+      this.pagesConfigDependencyPaths = dependencies.filter(isDependency)
+      debug.options(this.pagesGlobConfig)
+    }
+    catch (error) {
+      if (error instanceof PageConfigLoadError) {
+        this.pagesConfigDependencyPaths = [...new Set([
+          ...this.pagesConfigDependencyPaths,
+          ...error.dependencies,
+        ])].filter(isDependency)
+      }
+      throw error
+    }
   }
 
   /**
