@@ -20,6 +20,7 @@ export function resolveOptions(userOptions: UserOptions, viteRoot: string = proc
     configSource = 'pages.config',
     homePage = ['pages/index', 'pages/index/index'],
     mergePages = true,
+    platformSuffix = false,
     dir = 'src/pages',
     subPackages = [],
 
@@ -48,13 +49,14 @@ export function resolveOptions(userOptions: UserOptions, viteRoot: string = proc
 
   const resolvedHomePage = typeof homePage === 'string' ? [homePage] : homePage
   const resolvedConfigSource = typeof configSource === 'string' ? [{ files: configSource } as LoadConfigSource<PagesConfig>] : configSource
-  const resolvedDts = !dts ? false : typeof dts === 'string' ? dts : resolve(viteRoot, 'uni-pages.d.ts')
+  const resolvedDts = !dts ? false : resolve(root, typeof dts === 'string' ? dts : 'uni-pages.d.ts')
 
   const resolvedOptions: ResolvedOptions = {
     dts: resolvedDts,
     configSource: Array.isArray(resolvedConfigSource) ? resolvedConfigSource : [resolvedConfigSource],
     homePage: resolvedHomePage,
     mergePages,
+    platformSuffix,
     dirs: resolvedDirs,
     subPackages: resolvedSubDirs,
     subPackageRootMap,

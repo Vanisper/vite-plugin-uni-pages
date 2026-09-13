@@ -4,6 +4,7 @@ import type { Logger, ModuleNode, ViteDevServer } from 'vite'
 import type { ScanOptions } from './scan'
 import type { InternalPages, PagePath, ResolvedOptions, UserOptions } from './types'
 import type { PageWatcher } from './watcher'
+import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { platform as uniEnvPlatform } from '@uni-helper/uni-env'
@@ -21,6 +22,14 @@ import { Page } from './page'
 import { writePagesJson } from './pages-json'
 import { refreshScanDirs, watchScope } from './scan'
 import { attachWatcher } from './watcher'
+
+/** 完整生成过程中已加载配置与已写入产物的通知 */
+export interface GenerationObserver {
+  /** 配置加载后、执行用户后置钩子前触发 */
+  onConfigLoaded?: () => void
+  /** 产物写入成功或确认内容未变化时触发 */
+  onOutput?: (file: string, content: string, updated: boolean) => void
+}
 
 /**
  * 页面上下文：负责扫描页面、加载配置、合并页面信息、生成 pages.json
@@ -90,6 +99,7 @@ export class PageContext {
     this.platform = platform
     debug.options('root', this.root)
     this.options = resolveOptions(userOptions, this.root)
+    this.withUniPlatform = this.options.platformSuffix
     this.scanOptions = {
       dir: userOptions.dir ?? 'src/pages',
       subPackages: (userOptions.subPackages ?? []).map(source => typeof source === 'string' ? source : { ...source }),
@@ -207,15 +217,16 @@ export class PageContext {
    * 4. 合并页面配置
    * 5. 生成并写入 pages.json
    * @param filepath - 发生变更的文件路径，用于增量更新判断
+   * @param observer - 接收配置加载与产物完成通知；回调抛错时本次生成失败
    * @returns pages.json 是否成功更新
    */
-  updatePagesJSON(filepath?: string): Promise<boolean> {
-    const task = this.generationQueue.catch(() => {}).then(() => this.generatePagesJSON(filepath))
+  updatePagesJSON(filepath?: string, observer?: GenerationObserver): Promise<boolean> {
+    const task = this.generationQueue.catch(() => {}).then(() => this.generatePagesJSON(filepath, observer))
     this.generationQueue = task
     return task
   }
 
-  private async generatePagesJSON(filepath?: string): Promise<boolean> {
+  private async generatePagesJSON(filepath?: string, observer?: GenerationObserver): Promise<boolean> {
     if (filepath) {
       const page = this.findPage(filepath)
       if (page) {
@@ -231,9 +242,13 @@ export class PageContext {
       this.pages.clear()
       this.subPages.clear()
     }
+    const hadPagesJson = fs.existsSync(this.resolvedPagesJSONPath)
     checkPagesJsonFileSync(this.resolvedPagesJSONPath)
+    if (!hadPagesJson)
+      observer?.onOutput?.(this.resolvedPagesJSONPath, fs.readFileSync(this.resolvedPagesJSONPath, 'utf8'), true)
     this.options.onBeforeLoadUserConfig()
     await this.loadUserPagesConfig()
+    observer?.onConfigLoaded?.()
     this.options.onAfterLoadUserConfig(this.pagesGlobConfig)
 
     if (this.options.mergePages) {
@@ -249,11 +264,16 @@ export class PageContext {
     await this.mergeSubPageMetaData()
     this.options.onAfterMergePageMetaData(this.pageMetaData, this.subPageMetaData)
 
-    const pages = this.withUniPlatform
-      ? filterPlatformSuffixPages(this.pageMetaData, this.platform)
-      : this.pageMetaData
-
-    this.pageMetaData = dedupeByPath(pages)
+    if (this.withUniPlatform) {
+      this.pageMetaData = this.setHomePage(dedupeByPath(filterPlatformSuffixPages(this.pageMetaData, this.platform)))
+      this.subPageMetaData = this.subPageMetaData.flatMap((sub) => {
+        const pages = dedupeByPath(filterPlatformSuffixPages(sub.pages, this.platform))
+        return sub.pages.length && !pages.length ? [] : [{ ...sub, pages }]
+      })
+    }
+    else {
+      this.pageMetaData = dedupeByPath(this.pageMetaData)
+    }
 
     this.options.onBeforeWriteFile(this.resolvedPagesJSONPath)
 
@@ -286,7 +306,12 @@ export class PageContext {
     // 声明文件写的是另一个文件（uni-pages.d.ts），不需要和 pages.json
     // 用同一把锁。保持原有行为：不管内容变没变，都在 pages.json 计算
     // 之后运行
-    await this.generateDeclaration()
+    if (observer) {
+      if (!result)
+        throw new Error('[vite-plugin-uni-pages] Could not acquire the pages.json file lock')
+      observer.onOutput?.(this.resolvedPagesJSONPath, result.content, result.updated)
+    }
+    await this.generateDeclaration(observer?.onOutput)
 
     if (result?.updated) {
       this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
@@ -328,31 +353,40 @@ export class PageContext {
    * @returns 合并后的 tabBar 配置对象，无 tabBar 时为 undefined
    */
   async resolveTabBar(): Promise<TabBar | undefined> {
+    const normalizeItems = <T extends TabBarItem>(items: T[]): T[] => {
+      if (!this.withUniPlatform)
+        return items
+      return dedupeByPath(filterPlatformSuffixPages(items.map(item => ({ item, path: item.pagePath })), this.platform))
+        .map(({ item, path }) => ({ ...item, pagePath: path }))
+    }
     const tabBarItems: (TabBarItem & { index: number })[] = []
-    for (const [_, page] of this.pages) {
+    for (const page of this.getOrderedPages(this.pages)) {
+      if (this.withUniPlatform && !filterPlatformSuffixPages([{ path: page.uri }], this.platform).length)
+        continue
       const tabbar = await page.getTabBar()
       if (tabbar) {
         tabBarItems.push(tabbar)
       }
     }
 
-    if (tabBarItems.length === 0) {
-      return this.pagesGlobConfig?.tabBar
-    }
+    const configuredTabBar = this.pagesGlobConfig?.tabBar
+    if (tabBarItems.length === 0 && (!this.withUniPlatform || !configuredTabBar))
+      return configuredTabBar
 
     const tabBar = {
-      ...this.pagesGlobConfig?.tabBar,
-      list: this.pagesGlobConfig?.tabBar?.list || [],
+      ...configuredTabBar,
+      list: normalizeItems(configuredTabBar?.list || []).slice(),
     }
 
     const pagePaths = new Set(tabBar.list.map(item => item.pagePath))
 
-    tabBarItems.sort((a, b) => a.index - b.index)
+    const generated = normalizeItems(tabBarItems).sort((a, b) => a.index - b.index)
 
-    for (const item of tabBarItems) {
+    for (const item of generated) {
       if (!pagePaths.has(item.pagePath)) {
         const { index: _, ...tabbar } = item
         tabBar.list.push(tabbar)
+        pagePaths.add(item.pagePath)
       }
     }
 
@@ -363,7 +397,7 @@ export class PageContext {
    * 生成 TypeScript 声明文件
    * 为页面路径生成类型定义，导航时提供类型提示
    */
-  generateDeclaration(): Promise<void> | undefined {
+  generateDeclaration(onOutput?: GenerationObserver['onOutput']): Promise<void> | undefined {
     if (!this.options.dts)
       return
 
@@ -373,7 +407,7 @@ export class PageContext {
       subPackages: this.subPageMetaData,
       tabBar: this.tabBar,
       globConfig: this.pagesGlobConfig,
-    }, this.options.dts)
+    }, this.options.dts, onOutput)
   }
 
   /**
@@ -435,6 +469,15 @@ export class PageContext {
     this.subPages = subPages
   }
 
+  /** 平台页面覆盖基础页面，不依赖文件系统返回顺序 */
+  private getOrderedPages(pages: Map<string, Page>): Page[] {
+    const result = [...pages.values()]
+    if (this.withUniPlatform) {
+      result.sort((a, b) => Number(path.posix.basename(a.uri).includes('.')) - Number(path.posix.basename(b.uri).includes('.')))
+    }
+    return result
+  }
+
   /**
    * 解析 pages 规则并设置页面类型
    * @param pages 页面路径映射
@@ -445,7 +488,7 @@ export class PageContext {
   private async parsePages(pages: Map<string, Page>, packageType: 'main' | 'sub', overrides?: Pages): Promise<InternalPages> {
     // 先把所有页面读一遍：`skipped` 标记（definePage(null) 退出）只有
     // 读过文件之后才准确
-    const allPages = Array.from(pages.values())
+    const allPages = this.getOrderedPages(pages)
     await Promise.all(allPages.map(page => page.ensureLoaded()))
 
     const jobs = allPages.filter(page => !page.skipped).map(page => page.getPageMeta())
@@ -458,7 +501,7 @@ export class PageContext {
 
     const parseMeta = dedupeByPath(result)
 
-    return packageType === 'main' ? this.setHomePage(parseMeta) : parseMeta
+    return packageType === 'main' && !this.withUniPlatform ? this.setHomePage(parseMeta) : parseMeta
   }
 
   /**
@@ -638,7 +681,7 @@ function dedupeByPath<T extends { path: string }>(pageMetaData: T[]): T[] {
  * @param platform - 当前平台标识
  * @returns 过滤并剥掉后缀的新数组，入参不被修改
  */
-export function filterPlatformSuffixPages(pages: InternalPages, platform: string): InternalPages {
+export function filterPlatformSuffixPages<T extends { path: string }>(pages: T[], platform: string): T[] {
   return pages
     .filter((page) => {
       const fileName = page.path.slice(page.path.lastIndexOf('/') + 1)

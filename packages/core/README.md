@@ -235,6 +235,12 @@ interface UserOptions {
   mergePages?: boolean
 
   /**
+   * 是否应用 uni-platform 页面文件名后缀规则
+   * 省略时检测 uni-platform 插件；prepare() 要求显式设置
+   */
+  platformSuffix?: boolean
+
+  /**
    * 主包页面的搜索目录
    * 支持 glob 模式，如 'src/{pages,views}'
    * 最终结果由 tinyglobby 解析为匹配的目录列表
@@ -474,6 +480,34 @@ const pages = UniPages({
 
 这保证了 uni-pages 产物的更新；如果其他插件只在初始化时读取分包结构，它们仍可能需要重启。
 
+### 提前生成完整页面配置
+
+某些插件在工厂函数执行时就读取 `pages.json`，仅调整 Vite 插件顺序不足以让它们读到完整配置。这时可以在创建这些插件前调用 `prepare()`：
+
+```ts
+import Uni from '@uni-helper/plugin-uni'
+import UniPages from '@uni-helper/vite-plugin-uni-pages'
+import { defineConfig } from 'vite'
+
+export default defineConfig(async () => {
+  const pages = UniPages({ platformSuffix: false })
+  await pages.prepare()
+
+  return {
+    plugins: [pages, Uni()],
+  }
+})
+```
+
+`UniPages()` 仍同步返回 Vite 插件。`prepare({ root?, platform? })` 完成配置加载、页面扫描、合并，以及 `pages.json` 和声明文件的写入；Vite 初始化时复用同一个上下文。并发或重复调用会复用同一准备结果，失败后可重试。
+
+- `root` 默认使用 `VITE_ROOT_DIR`，否则使用当前工作目录；`platform` 默认取 uni-env 的当前平台。指定的值须与最终 Vite 环境一致。
+- 提前准备时必须显式设置 `platformSuffix`；普通初始化省略此选项时，仍自动检测 `vite-plugin-uni-platform`。开启后会统一处理主包、分包与 TabBar 的平台后缀，再确定首页和声明中的路由。
+- 准备期间或 Vite 接管前，输入文件或生成产物发生变化会拒绝接管。应重新创建插件并重启本次构建，确保下游读取同一份配置。
+- 准备失败时，仅恢复本次写入且尚未被外部修改的产物。声明文件也通过文件锁和原子写入生成。
+
+`prepare()` 不会改变 `generateAll()` 的独立调用方式；需要与后续 Vite 生命周期复用上下文时，使用插件实例上的 `prepare()`。
+
 ## 0.5.0 破坏性变更
 
 升级到 0.5.0 前请阅读以下变更：
@@ -559,7 +593,8 @@ const pages = UniPages({
 插件围绕 `PageContext` 组织核心流程，流水线阶段顺序固定（加载用户配置 → 扫描页面 → 合并页面配置 → 写入 pages.json），各专项能力放在独立的模块里：
 
 ```
-index.ts          Vite 插件入口 — configResolved / transform / configureServer / resolveId / load
+index.ts          Vite 插件入口 — prepare / configResolved / transform / configureServer / resolveId / load
+preparation.ts    准备快照 — 输入与产物校验、失败恢复
 context.ts        PageContext 编排核心 — 配置加载、扫描、合并、监听、虚拟模块与 HMR
 pipeline.ts       纯流水线入口 — createPages / generateAll，root 和 platform 从外部传入，测试直接走这里
 pages-json.ts     pages.json 读-改-写 — 多平台 #ifdef 合并、首页排前、
@@ -597,10 +632,11 @@ pipeline.ts ── context.ts             测试与外部调用的流水线入�
 插件通过 Vite 的生命周期钩子驱动，顺序如下：
 
 1. **插件工厂调用**（同步）— 预检 `pages.json` 是否存在且合法（此时 `config.root` 未知，回退到 `VITE_ROOT_DIR` / `process.cwd()` 解析路径）
-2. **`configResolved`**（异步）— 创建 `PageContext`，检测是否与 `vite-plugin-uni-platform` 协同，执行首次 `updatePagesJSON()` 生成 pages.json；`build --watch` 模式下另建 chokidar 监听扫描规则的稳定祖先
-3. **`configureServer`**（dev）— 复用 Vite 的 `server.watcher`，把配置文件源（`pages.config.ts` 等）加入监听；变更时重跑完整流水线，失效虚拟模块并通知浏览器 full-reload
-4. **`transform`** — 从 vue / nvue / uvue 文件中移除 `definePage` 宏调用，避免运行时报错
-5. **`resolveId` / `load`** — 提供 `virtual:uni-pages` 虚拟模块，暴露所有页面元数据
+2. **`prepare()`**（可选）— 在下游插件工厂之前生成完整产物并保存输入快照
+3. **`configResolved`**（异步）— 创建 `PageContext` 并生成产物，或校验并接管已准备的上下文；`build --watch` 模式下另建 chokidar 监听扫描规则的稳定祖先
+4. **`configureServer`**（dev）— 复用 Vite 的 `server.watcher`，把配置文件源（`pages.config.ts` 等）加入监听；变更时重跑完整流水线，失效虚拟模块并通知浏览器 full-reload
+5. **`transform`** — 从 vue / nvue / uvue 文件中移除 `definePage` 宏调用，避免运行时报错
+6. **`resolveId` / `load`** — 提供 `virtual:uni-pages` 虚拟模块，暴露所有页面元数据
 
 ### 关键设计决策
 

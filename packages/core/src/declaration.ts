@@ -1,9 +1,11 @@
 import type { PagesConfig, SubPackages, TabBar } from '@uni-helper/uni-pages-types'
 import type { InternalPages } from './types'
 import { existsSync } from 'node:fs'
-import { writeFile as fsWriteFile, mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { normalizePath } from 'vite'
+import writeFileAtomic from 'write-file-atomic'
+import { withFileLock } from './files'
 
 /** 声明生成需要的路由数据，从合并结果直接取 */
 export interface DeclarationInput {
@@ -79,29 +81,24 @@ declare module "virtual:uni-pages" {
 }
 
 /**
- * 写入文件，自动创建所在目录
- * @param filePath - 文件路径
- * @param content - 文件内容
- */
-async function writeFile(filePath: string, content: string): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
-  return await fsWriteFile(filePath, content, 'utf-8')
-}
-
-/**
  * 将声明文件写入磁盘
  * 仅在内容变化时写入，避免不必要的文件操作
  *
  * @param input - 合并后的路由数据
  * @param filepath - 声明文件输出路径
+ * @param onOutput - 写入成功或确认内容未变化后的通知
  */
-export async function writeDeclaration(input: DeclarationInput, filepath: string): Promise<void> {
-  const originalContent = existsSync(filepath) ? await readFile(filepath, 'utf-8') : ''
-
+export async function writeDeclaration(input: DeclarationInput, filepath: string, onOutput?: (file: string, content: string, updated: boolean) => void): Promise<void> {
   const code = getDeclaration(input)
-  if (!code)
-    return
-
-  if (code !== originalContent)
-    await writeFile(filepath, code)
+  await mkdir(dirname(filepath), { recursive: true })
+  const completed = await withFileLock(filepath, async () => {
+    const original = existsSync(filepath) ? await readFile(filepath, 'utf8') : ''
+    const updated = code !== original
+    if (updated)
+      await writeFileAtomic(filepath, code)
+    onOutput?.(filepath, code, updated)
+    return true
+  })
+  if (!completed)
+    throw new Error(`[vite-plugin-uni-pages] Could not acquire the declaration file lock: ${filepath}`)
 }

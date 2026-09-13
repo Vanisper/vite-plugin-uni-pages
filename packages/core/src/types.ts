@@ -163,6 +163,13 @@ export interface Options {
   mergePages: boolean
 
   /**
+   * 是否应用 uni-platform 的页面文件名后缀规则
+   *
+   * @description 省略时由 Vite 检测 uni-platform 插件；调用 prepare() 时须显式设置
+   */
+  platformSuffix: boolean
+
+  /**
    * 主包页面的搜索目录
    *
    * 支持 glob 模式，如 'src/{pages,views}'。
