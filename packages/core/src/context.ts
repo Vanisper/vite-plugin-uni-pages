@@ -20,7 +20,7 @@ import { debug } from './logger'
 import { resolveOptions } from './options'
 import { Page } from './page'
 import { writePagesJson } from './pages-json'
-import { refreshScanDirs, watchScope } from './scan'
+import { refreshScanDirs, watchScope, within } from './scan'
 import { attachWatcher } from './watcher'
 
 /** 完整生成过程中已加载配置与已写入产物的通知 */
@@ -465,7 +465,7 @@ export class PageContext {
     const paths: Record<string, PagePath[]> = {}
     const subPages = new Map<string, Map<string, Page>>()
     for (const dir of this.options.subPackages) {
-      const pagePaths = getPagePaths(dir, this.options)
+      const pagePaths = getPagePaths(dir, this.options, this.options.subPackageRootMap.get(dir))
       paths[dir] = pagePaths
 
       const pages = new Map<string, Page>()
@@ -644,17 +644,23 @@ function resolveBasePath(options: ResolvedOptions): string {
  * 获取指定目录下的全部页面路径
  * @param dir - 页面目录路径
  * @param options - 解析后的配置项
+ * @param outputRoot - 分包的输出根路径，扫描目录不在该路径下时用于重映射
  * @returns 包含相对路径与绝对路径的页面路径数组
  */
-function getPagePaths(dir: string, options: ResolvedOptions): PagePath[] {
+function getPagePaths(dir: string, options: ResolvedOptions, outputRoot?: string): PagePath[] {
   const pagesDirPath = normalizePath(path.resolve(options.root, dir))
   const basePath = resolveBasePath(options)
+  const mappedRoot = outputRoot !== undefined && !within(pagesDirPath, normalizePath(path.resolve(basePath, outputRoot)))
+    ? outputRoot
+    : undefined
   const files = getPageFiles(pagesDirPath, options)
   debug.pages(dir, files)
   const pagePaths = files
     .map(file => normalizePath(file))
     .map(file => ({
-      relativePath: path.relative(basePath, normalizePath(path.resolve(pagesDirPath, file))),
+      relativePath: mappedRoot === undefined
+        ? path.relative(basePath, normalizePath(path.resolve(pagesDirPath, file)))
+        : path.posix.join(mappedRoot, file),
       absolutePath: normalizePath(path.resolve(pagesDirPath, file)),
     }))
 

@@ -451,7 +451,7 @@ export default defineConfig({
 })
 ```
 
-这样生成的 `pages.json` 中 `subPackages.root` 将使用自定义的值，而不是基于文件系统计算的相对路径，避免出现 `..` 造成路径问题。
+这样生成的 `pages.json` 中 `subPackages.root` 将使用自定义的值，而不是基于文件系统计算的相对路径，避免出现 `..` 造成路径问题。扫描目录位于输出 root 对应的物理目录内时，保留其下的目录层级；否则按扫描目录内的相对路径映射页面。该映射用于页面配置和路由声明，源码的复制或打包位置由使用方的构建流程负责。
 
 更多上下文参考 <https://github.com/uni-helper/vite-plugin-uni-pages/issues/271>。
 

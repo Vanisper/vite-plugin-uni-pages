@@ -547,11 +547,11 @@ describe('generate routes', () => {
           "root": "packages/activity/src/pages",
           "pages": [
             {
-              "path": "../../../../../playground/src/pages-sub-pages/sub-activity/pages/about/index",
+              "path": "pages/about/index",
               "type": "page"
             },
             {
-              "path": "../../../../../playground/src/pages-sub-pages/sub-activity/pages/home/index",
+              "path": "pages/home/index",
               "type": "page"
             }
           ]
@@ -560,11 +560,11 @@ describe('generate routes', () => {
           "root": "packages/main/src/pages",
           "pages": [
             {
-              "path": "../../../../../playground/src/pages-sub-pages/sub-main/pages/about/index",
+              "path": "pages/about/index",
               "type": "page"
             },
             {
-              "path": "../../../../../playground/src/pages-sub-pages/sub-main/pages/home/index",
+              "path": "pages/home/index",
               "type": "page"
             }
           ]
