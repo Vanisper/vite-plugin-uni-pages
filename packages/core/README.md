@@ -423,37 +423,37 @@ export default defineConfig({
 
 ### 支持 monorepo 吗？
 
-在 monorepo 项目中，如果页面分布在多个 package 中，可以使用 `subPackages` 配置的对象格式来自定义生成的 `root` 路径。
+可以将页面分布在多个 workspace 包中。`dir` 指定扫描目录，`root` 指定分包根目录，生成的页面 `path` 相对于该 `root` 计算。以 `pages.json` 所在目录为基准，组合 `root` 与 `path` 后仍指向扫描到的源码。
+
+各业务包位于同一个 uni-app 编译输入目录内时，可以直接注册为分包页面。例如将仓库根目录作为 `UNI_INPUT_DIR`：
+
+```text
+repo/
+├─ App.vue
+├─ main.ts
+├─ manifest.json
+├─ pages.json
+├─ apps/mobile/src/pages/index.vue
+└─ packages/login/src/pages/detail.vue
+```
+
+在启动 uni CLI 前设置 `UNI_INPUT_DIR`，并将 Vite `root` 设为上述仓库根目录；uni-pages 配置如下：
 
 ```ts
-// vite.config.mts
-import UniPages from '@uni-helper/vite-plugin-uni-pages'
-import { defineConfig } from 'vite'
-
-export default defineConfig({
-  plugins: [
-    UniPages({
-      subPackages: [
-        // 简写格式（原有功能）
-        'src/pages-sub',
-        // 对象格式（monorepo 支持）
-        {
-          dir: '../../packages/login/src/pages', // 页面目录路径
-          root: 'packages/login/src/pages', // 自定义 pages.json 中的 root
-        },
-        {
-          dir: '../../packages/user/src/pages',
-          root: 'packages/user/src/pages',
-        },
-      ],
-    }),
-  ],
+UniPages({
+  outDir: '.',
+  dir: 'apps/mobile/src/pages',
+  homePage: 'apps/mobile/src/pages/index',
+  subPackages: [{
+    dir: 'packages/login/src/pages',
+    root: 'packages/login',
+  }],
 })
 ```
 
-这样生成的 `pages.json` 中 `subPackages.root` 将使用自定义的值，而不是基于文件系统计算的相对路径，避免出现 `..` 造成路径问题。扫描目录位于输出 root 对应的物理目录内时，保留其下的目录层级；否则按扫描目录内的相对路径映射页面。该映射用于页面配置和路由声明，源码的复制或打包位置由使用方的构建流程负责。
+生成的分包为 `root: 'packages/login'`、页面 `path: 'src/pages/detail'`。微信小程序的页面产物对应 `packages/login/src/pages/detail.*`。
 
-更多上下文参考 <https://github.com/uni-helper/vite-plugin-uni-pages/issues/271>。
+`outDir` 是 `pages.json` 的生成目录，应与 uni-app 的 `UNI_INPUT_DIR` 对齐。配置自定义 `root` 不会搬运源码或建立页面模块别名；扫描输入目录外的页面可能产生含 `../` 的路径，其可打包性取决于下游编译器。多个独立应用共用仓库输入根时，还需隔离各自的入口和配置文件。
 
 ### 按目录约定发现分包
 

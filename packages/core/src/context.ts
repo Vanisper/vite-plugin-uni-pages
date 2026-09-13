@@ -20,7 +20,7 @@ import { debug } from './logger'
 import { resolveOptions } from './options'
 import { Page } from './page'
 import { writePagesJson } from './pages-json'
-import { refreshScanDirs, watchScope, within } from './scan'
+import { refreshScanDirs, watchScope } from './scan'
 import { attachWatcher } from './watcher'
 
 /** 完整生成过程中已加载配置与已写入产物的通知 */
@@ -465,7 +465,7 @@ export class PageContext {
     const paths: Record<string, PagePath[]> = {}
     const subPages = new Map<string, Map<string, Page>>()
     for (const dir of this.options.subPackages) {
-      const pagePaths = getPagePaths(dir, this.options, this.options.subPackageRootMap.get(dir))
+      const pagePaths = getPagePaths(dir, this.options)
       paths[dir] = pagePaths
 
       const pages = new Map<string, Page>()
@@ -586,9 +586,7 @@ export class PageContext {
     const subPackages = this.pagesGlobConfig?.subPackages || []
 
     for (const [dir, pages] of this.subPages) {
-      // 优先用 subPackageRootMap 里的自定义 root，没有才按路径计算。
-      // monorepo 场景下，自定义 root 可以避免 pages.json 里的 root
-      // 出现 '..'
+      // 自定义 root 只改变页面相对路径的基准，保留实际文件位置
       const root = this.options.subPackageRootMap.get(dir)
         ?? normalizePath(path.relative(this.basePath, path.join(this.options.root, dir)))
 
@@ -644,23 +642,17 @@ function resolveBasePath(options: ResolvedOptions): string {
  * 获取指定目录下的全部页面路径
  * @param dir - 页面目录路径
  * @param options - 解析后的配置项
- * @param outputRoot - 分包的输出根路径，扫描目录不在该路径下时用于重映射
  * @returns 包含相对路径与绝对路径的页面路径数组
  */
-function getPagePaths(dir: string, options: ResolvedOptions, outputRoot?: string): PagePath[] {
+function getPagePaths(dir: string, options: ResolvedOptions): PagePath[] {
   const pagesDirPath = normalizePath(path.resolve(options.root, dir))
   const basePath = resolveBasePath(options)
-  const mappedRoot = outputRoot !== undefined && !within(pagesDirPath, normalizePath(path.resolve(basePath, outputRoot)))
-    ? outputRoot
-    : undefined
   const files = getPageFiles(pagesDirPath, options)
   debug.pages(dir, files)
   const pagePaths = files
     .map(file => normalizePath(file))
     .map(file => ({
-      relativePath: mappedRoot === undefined
-        ? path.relative(basePath, normalizePath(path.resolve(pagesDirPath, file)))
-        : path.posix.join(mappedRoot, file),
+      relativePath: path.relative(basePath, normalizePath(path.resolve(pagesDirPath, file))),
       absolutePath: normalizePath(path.resolve(pagesDirPath, file)),
     }))
 

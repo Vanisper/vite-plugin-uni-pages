@@ -183,11 +183,7 @@ export interface Options {
   /**
    * uni-app 分包加载的子包页面目录
    *
-   * 支持固定目录、glob 模式，以及指定输出 root 的对象形式
-   *
-   * monorepo 项目中页面可能位于项目根目录之外。使用对象形式指定
-   * 出现在 pages.json 中的自定义 root，避免生成的 root 路径含 '..'。
-   * glob 匹配多个目录时，可用 root 函数分别计算各子包的输出路径。
+   * @description 支持固定目录、glob 模式及对象形式；对象的 root 指定子包根目录，可按匹配目录计算
    *
    * @see https://github.com/uni-helper/vite-plugin-uni-pages/issues/271
    * @default []
@@ -315,19 +311,14 @@ export interface ResolvedOptions extends Omit<Options, 'dir' | 'homePage' | 'con
 }
 
 /**
- * 子包配置接口
- * 为 monorepo 支持，允许自定义 pages.json 中的 root 路径
- *
- * monorepo 项目中页面可能位于项目根目录之外（如 ../../packages/login/src/pages）。
- * 默认情况下插件会生成含 '..' 的 root 路径，而 uni-app 不支持。
- * 通过该配置指定出现在 pages.json 中的自定义 root。
+ * 子包的扫描目录与页面路径基准
  *
  * @example
  * ```ts
  * subPackages: [
  *   {
- *     dir: '../../packages/login/src/pages',  // 实际扫描的物理目录
- *     root: 'packages/login/src/pages',       // pages.json 中的自定义 root
+ *     dir: 'src/packages/login/pages',
+ *     root: 'packages/login',
  *   }
  * ]
  * ```
@@ -338,7 +329,9 @@ export interface SubPackageConfig {
   /**
    * 出现在 pages.json subPackages.root 中的自定义根路径
    *
-   * @description 函数接收相对项目 root 的 POSIX 目录路径，须同步返回非空字符串
+   * @description
+   * - 页面 path 相对于此目录计算，保留扫描文件的实际位置
+   * - 函数接收相对项目 root 的 POSIX 目录路径，须同步返回非空字符串
    */
   root: string | ((dir: string) => string)
 }
