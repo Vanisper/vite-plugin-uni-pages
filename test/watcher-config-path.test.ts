@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { PageContext } from '../packages/core/src'
 
 /**
@@ -16,12 +16,13 @@ import { PageContext } from '../packages/core/src'
 describe('watcher normalizes config change paths before matching sources', () => {
   let tmpDir: string
   let ctx: PageContext
-  let changeHandler: ((path: string) => void) | undefined
+  let changeHandler: ((event: string, path: string) => void) | undefined
 
   const watcherStub = {
     add: vi.fn(),
-    on: (event: string, handler: (path: string) => void) => {
-      if (event === 'change')
+    off: vi.fn(),
+    on: (event: string, handler: (event: string, path: string) => void) => {
+      if (event === 'all')
         changeHandler = handler
     },
   }
@@ -36,21 +37,29 @@ describe('watcher normalizes config change paths before matching sources', () =>
     await ctx.setupWatcher(watcherStub as any)
   })
 
-  it('reacts to an event path that only differs by a redundant segment', () => {
+  afterAll(async () => {
+    await ctx.disposeWatcher()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('reacts to an event path that only differs by a redundant segment', async () => {
     // 归一化前两个字符串不相等；归一化后指向同一个配置文件
-    changeHandler!(`${tmpDir}/src/../pages.config.ts`)
+    changeHandler!('change', `${tmpDir}/src/../pages.config.ts`)
+    await ctx.flushWatcher()
     expect(ctx.updatePagesJSON).toHaveBeenCalled()
   })
 
-  it('still reacts to an exact source path', () => {
+  it('still reacts to an exact source path', async () => {
     vi.mocked(ctx.updatePagesJSON).mockClear()
-    changeHandler!(`${tmpDir}/pages.config.ts`)
+    changeHandler!('change', `${tmpDir}/pages.config.ts`)
+    await ctx.flushWatcher()
     expect(ctx.updatePagesJSON).toHaveBeenCalled()
   })
 
-  it('still ignores files outside the config sources and page dirs', () => {
+  it('still ignores files outside the config sources and page dirs', async () => {
     vi.mocked(ctx.updatePagesJSON).mockClear()
-    changeHandler!(`${tmpDir}/untracked/notes.txt`)
+    changeHandler!('change', `${tmpDir}/untracked/notes.txt`)
+    await ctx.flushWatcher()
     expect(ctx.updatePagesJSON).not.toHaveBeenCalled()
   })
 })

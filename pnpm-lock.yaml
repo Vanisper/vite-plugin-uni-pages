@@ -151,6 +151,9 @@ importers:
       bumpp:
         specifier: 'catalog:'
         version: 12.2.1
+      chokidar:
+        specifier: 'catalog:'
+        version: 5.0.0
       comment-json:
         specifier: 'catalog:'
         version: 5.0.0

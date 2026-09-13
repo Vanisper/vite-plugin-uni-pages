@@ -246,12 +246,12 @@ interface UserOptions {
   /**
    * 分包页面目录的根目录列表
    * 用于 uni-app 的分包加载功能
-   * 支持字符串格式（目录路径）或对象格式（自定义 pages.json 中的 root）
+   * 字符串或对象的 dir 均支持 glob，root 可按匹配目录计算
    * 更多上下文参考 <https://github.com/uni-helper/vite-plugin-uni-pages/issues/271>
    * @default []
    * @since 0.1.8
    */
-  subPackages?: (string | { dir: string, root: string })[]
+  subPackages?: (string | { dir: string, root: string | ((dir: string) => string) })[]
 
   /**
    * pages.json 所在目录
@@ -449,6 +449,31 @@ export default defineConfig({
 
 更多上下文参考 <https://github.com/uni-helper/vite-plugin-uni-pages/issues/271>。
 
+### 按目录约定发现分包
+
+`subPackages` 的字符串和对象 `dir` 均支持 glob，可与固定目录混用：
+
+```ts
+import { posix } from 'node:path'
+import UniPages from '@uni-helper/vite-plugin-uni-pages'
+
+const pages = UniPages({
+  subPackages: [
+    'src/pages-sub',
+    {
+      dir: 'src/packages/*/pages',
+      root: dir => posix.relative('src', posix.dirname(dir)),
+    },
+  ],
+})
+```
+
+`root` 函数同步接收相对 Vite 项目根目录、使用 `/` 分隔的实际目录。例如 `src/packages/account/pages` 可映射为 `packages/account`，页面 `pages/profile.vue` 在该分包中的路径为 `pages/profile`。相同目录和 root 的重复配置会去重；同一目录映射多个 root，或多个目录映射同一 root 时会报错。
+
+开发服务器和 `build --watch` 都会重新发现匹配目录，支持从零个分包开始新增，以及删除、重建和重命名目录。监听覆盖扫描规则的稳定祖先，并过滤无关路径；生成的空分包会省略。已有配置文件的创建、删除和重建也会触发更新。`pages.json` 和声明文件生成完成后才通知 HMR。
+
+这保证了 uni-pages 产物的更新；如果其他插件只在初始化时读取分包结构，它们仍可能需要重启。
+
 ## 0.5.0 破坏性变更
 
 升级到 0.5.0 前请阅读以下变更：
@@ -545,6 +570,8 @@ macro.ts          definePage 宏解析 — SFC 解析、单个 script 块失败�
 condition.ts      按平台写配置 — define().ifdef()/.ifndef()，扫描时就算成当前平台的普通对象
 page.ts           页面实体 — 文件读取、宏求值、变更检测、跳过状态
 options.ts        选项解析 — 默认值合并、glob 目录解析、subPackages root 映射
+scan.ts           扫描规则 — 动态目录发现、稳定监听范围、配置候选路径
+watcher.ts        监听订阅 — 文件事件过滤、串行生成队列与资源释放
 declaration.ts    uni-pages.d.ts 生成，为导航 API 提供路径类型检查
 config.ts         defineUniPages 辅助函数 + 类型重导出
 constant.ts       常量 — 虚拟模块 ID、页面文件扩展名（vue / nvue / uvue）
@@ -570,7 +597,7 @@ pipeline.ts ── context.ts             测试与外部调用的流水线入�
 插件通过 Vite 的生命周期钩子驱动，顺序如下：
 
 1. **插件工厂调用**（同步）— 预检 `pages.json` 是否存在且合法（此时 `config.root` 未知，回退到 `VITE_ROOT_DIR` / `process.cwd()` 解析路径）
-2. **`configResolved`**（异步）— 创建 `PageContext`，检测是否与 `vite-plugin-uni-platform` 协同，执行首次 `updatePagesJSON()` 生成 pages.json；`build --watch` 模式下另建 chokidar 监听页面目录
+2. **`configResolved`**（异步）— 创建 `PageContext`，检测是否与 `vite-plugin-uni-platform` 协同，执行首次 `updatePagesJSON()` 生成 pages.json；`build --watch` 模式下另建 chokidar 监听扫描规则的稳定祖先
 3. **`configureServer`**（dev）— 复用 Vite 的 `server.watcher`，把配置文件源（`pages.config.ts` 等）加入监听；变更时重跑完整流水线，失效虚拟模块并通知浏览器 full-reload
 4. **`transform`** — 从 vue / nvue / uvue 文件中移除 `definePage` 宏调用，避免运行时报错
 5. **`resolveId` / `load`** — 提供 `virtual:uni-pages` 虚拟模块，暴露所有页面元数据
@@ -582,7 +609,8 @@ pipeline.ts ── context.ts             测试与外部调用的流水线入�
 - **文件锁 + 原子写入**：整个「读 → 合并 → 写」在同一个 `withFileLock` 内执行，写入走 tmp + rename，多终端并发（如同时跑 mp-weixin 和 mp-alipay）不会互相覆盖或读到写了一半的内容。
 - **内容不变就不写**：写入前先和磁盘上的内容比一遍，没变化就跳过，避免触发下游不必要的重编译。
 - **统一监听**：配置文件与页面文件共用同一个 chokidar（dev 下直接复用 Vite 的 watcher，不额外创建）；配置变更不做增量，直接重跑完整流水线，配合「内容不变就不写」避免多余的磁盘写入。
-- **增量页面更新**：页面文件变更时先经 `hasChanged()` 检测页面配置是否真的变化，无变化则跳过整轮流水线。
+- **批量页面更新**：连续文件事件合并为一次生成，串行刷新目录与页面缓存；调用 `updatePagesJSON(filepath)` 时仍可按单文件元数据跳过无变化的更新。
+- **监听释放**：dev 关闭时只移除本插件的订阅；`build --watch` 在 `closeWatcher` 时关闭自建监听器，单轮 `closeBundle` 保留监听。
 - **宏解析失败隔离**：每个 `<script>` 块独立解析，单块语法错误（如 Babel 8 已移除的 `assert` import attributes）只影响该块，不会阻断其它块的宏移除。
 - **无导入时副作用**：所有文件系统操作都在插件生命周期内执行，而非模块导入时，模块可独立测试。
 - **可从外部传入的入口**：`pipeline.ts` 的 `root` / `platform` 从外部传入，测试不绑定进程环境变量，平台相关快照结果确定。

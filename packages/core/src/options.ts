@@ -1,7 +1,7 @@
 import type { PagesConfig } from '@uni-helper/uni-pages-types'
 import type { LoadConfigSource } from 'unconfig'
 import type { ResolvedOptions, UserOptions } from './types'
-import { resolve } from 'node:path'
+import path, { resolve } from 'node:path'
 import process from 'node:process'
 import { globSync } from 'tinyglobby'
 import { normalizePath } from 'vite'
@@ -44,22 +44,7 @@ export function resolveOptions(userOptions: UserOptions, viteRoot: string = proc
   const root = viteRoot || normalizePath(process.env.VITE_ROOT_DIR || process.cwd())
   const resolvedDirs = resolvePageDirs(dir, root, exclude)
 
-  // 处理 subPackages：同时支持字符串和 SubPackageConfig 两种格式。
-  // monorepo 项目里，用户可能需要在 pages.json 中使用自定义 root 路径，
-  // 而不是自动生成带 '..' 的相对路径
-  const subPackageRootMap = new Map<string, string>()
-  const resolvedSubDirs: string[] = []
-  for (const sub of subPackages) {
-    if (typeof sub === 'string') {
-      resolvedSubDirs.push(normalizePath(sub))
-    }
-    else {
-      const dirPath = normalizePath(sub.dir)
-      resolvedSubDirs.push(dirPath)
-      // 记录物理目录到 pages.json 自定义 root 的映射
-      subPackageRootMap.set(dirPath, sub.root)
-    }
-  }
+  const { dirs: resolvedSubDirs, roots: subPackageRootMap } = resolveSubPackages(subPackages, root, outDir, exclude)
 
   const resolvedHomePage = typeof homePage === 'string' ? [homePage] : homePage
   const resolvedConfigSource = typeof configSource === 'string' ? [{ files: configSource } as LoadConfigSource<PagesConfig>] : configSource
@@ -110,4 +95,37 @@ export function resolvePageDirs(dir: string, root: string, exclude: string[]): s
     cwd: root,
   })
   return dirs
+}
+
+/** 展开子包目录，并验证物理目录与输出 root 的一一对应关系 */
+export function resolveSubPackages(sources: NonNullable<UserOptions['subPackages']>, root: string, outDir: string, exclude: string[]): { dirs: string[], roots: Map<string, string> } {
+  const roots = new Map<string, string>()
+  const dirsByRoot = new Map<string, string>()
+
+  for (const source of sources) {
+    const pattern = typeof source === 'string' ? source : source.dir
+    const dirs = resolvePageDirs(pattern, root, exclude)
+      .map(dir => normalizePath(path.relative(root, path.resolve(root, dir))))
+      .sort()
+
+    for (const dir of dirs) {
+      const configuredRoot = typeof source === 'string' ? undefined : source.root
+      const outputRoot = typeof configuredRoot === 'function'
+        ? configuredRoot(dir)
+        : configuredRoot ?? normalizePath(path.relative(path.resolve(root, outDir), path.resolve(root, dir)))
+      if (typeof outputRoot !== 'string' || !outputRoot.trim())
+        throw new Error(`[vite-plugin-uni-pages] Invalid subPackage root for "${dir}": expected a non-empty string`)
+
+      const normalizedRoot = normalizePath(outputRoot)
+      if (roots.has(dir) && roots.get(dir) !== normalizedRoot)
+        throw new Error(`[vite-plugin-uni-pages] SubPackage directory "${dir}" maps to conflicting roots "${roots.get(dir)}" and "${normalizedRoot}"`)
+      if (dirsByRoot.has(normalizedRoot) && dirsByRoot.get(normalizedRoot) !== dir)
+        throw new Error(`[vite-plugin-uni-pages] SubPackage root "${normalizedRoot}" maps to conflicting directories "${dirsByRoot.get(normalizedRoot)}" and "${dir}"`)
+
+      roots.set(dir, normalizedRoot)
+      dirsByRoot.set(normalizedRoot, dir)
+    }
+  }
+
+  return { dirs: [...roots.keys()], roots }
 }

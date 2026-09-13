@@ -36,6 +36,7 @@
     "@antfu/eslint-config": "catalog:",
     "@types/node": "catalog:",
     "bumpp": "catalog:",
+    "chokidar": "catalog:",
     "comment-json": "catalog:",
     "eslint": "catalog:",
     "rimraf": "catalog:",

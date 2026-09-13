@@ -176,10 +176,11 @@ export interface Options {
   /**
    * uni-app 分包加载的子包页面目录
    *
-   * 支持字符串形式（目录路径）或对象形式（pages.json 中的自定义 root）
+   * 支持固定目录、glob 模式，以及指定输出 root 的对象形式
    *
    * monorepo 项目中页面可能位于项目根目录之外。使用对象形式指定
    * 出现在 pages.json 中的自定义 root，避免生成的 root 路径含 '..'。
+   * glob 匹配多个目录时，可用 root 函数分别计算各子包的输出路径。
    *
    * @see https://github.com/uni-helper/vite-plugin-uni-pages/issues/271
    * @default []
@@ -325,10 +326,14 @@ export interface ResolvedOptions extends Omit<Options, 'dir' | 'homePage' | 'con
  * ```
  */
 export interface SubPackageConfig {
-  /** 扫描页面文件的实际物理目录路径 */
+  /** 扫描页面文件的物理目录，支持 glob 模式 */
   dir: string
-  /** 出现在 pages.json subPackages.root 中的自定义根路径 */
-  root: string
+  /**
+   * 出现在 pages.json subPackages.root 中的自定义根路径
+   *
+   * @description 函数接收相对项目 root 的 POSIX 目录路径，须同步返回非空字符串
+   */
+  root: string | ((dir: string) => string)
 }
 
 /**

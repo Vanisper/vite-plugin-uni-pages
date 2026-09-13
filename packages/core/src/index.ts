@@ -1,10 +1,10 @@
-import type { Plugin } from 'vite'
+import type { FSWatcher } from 'chokidar'
+import type { Plugin, ViteDevServer } from 'vite'
 import type { UserOptions } from './types'
-import path from 'node:path'
 import process from 'node:process'
 import chokidar from 'chokidar'
 import MagicString from 'magic-string'
-import { createLogger, normalizePath } from 'vite'
+import { createLogger } from 'vite'
 import {
   FILE_EXTENSIONS,
   MODULE_ID_VIRTUAL,
@@ -13,6 +13,7 @@ import {
 import { PageContext } from './context'
 import { checkPagesJsonFileSync, resolvePagesJsonPath } from './files'
 import { findDefinePageMacro } from './macro'
+import { watchScope } from './scan'
 
 export * from './condition'
 export * from './config'
@@ -42,6 +43,26 @@ export type * from '@uni-helper/uni-pages-types'
  */
 export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
   let ctx: PageContext
+  let ownedWatcher: FSWatcher | undefined
+  let server: ViteDevServer | undefined
+  let watchBuild = false
+
+  const onWatcherError = (error: unknown): void => {
+    ctx.logger?.error(error instanceof Error ? error.stack ?? error.message : String(error))
+  }
+  const dispose = async (): Promise<void> => {
+    server?.httpServer?.off('close', onServerClose)
+    await ctx?.disposeWatcher()
+    const watcher = ownedWatcher
+    ownedWatcher = undefined
+    if (watcher) {
+      watcher.off('error', onWatcherError)
+      await watcher.close()
+    }
+  }
+  function onServerClose(): void {
+    void dispose()
+  }
 
   // config.root 要到 configResolved 才知道，这里先用和 Vite 一样的根
   // 目录规则算个大概，路径规则只维护一份。注意：Vite 的 root 和 cwd
@@ -73,11 +94,32 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
       ctx.setLogger(logger)
       await ctx.updatePagesJSON()
 
-      if (config.command === 'build') {
-        if (config.build.watch) {
-          // 必须相对真实的 Vite root 解析：否则 chokidar 会按 process.cwd()
-          // 解释相对目录，在 root 与 cwd 不一致时监听到错误的目录
-          ctx.setupWatcher(chokidar.watch([...ctx.options.dirs, ...ctx.options.subPackages].map(v => normalizePath(path.resolve(config.root, v)))))
+      watchBuild = config.command === 'build' && !!config.build.watch
+      if (watchBuild) {
+        const scope = watchScope(ctx)
+        const watcher = chokidar.watch(scope.roots, { ignoreInitial: true, ignored: scope.ignored })
+        ownedWatcher = watcher
+        watcher.on('error', onWatcherError)
+        try {
+          await new Promise<void>((resolve, reject) => {
+            function onReady(): void {
+              watcher.off('error', onError)
+              resolve()
+            }
+            function onError(error: unknown): void {
+              watcher.off('ready', onReady)
+              reject(error)
+            }
+            watcher.once('ready', onReady)
+            watcher.once('error', onError)
+          })
+          await ctx.setupWatcher(watcher)
+          // 补齐首次生成到监听就绪之间的变更
+          await ctx.updatePagesJSON()
+        }
+        catch (error) {
+          await dispose()
+          throw error
         }
       }
     },
@@ -124,8 +166,18 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
      * 配置开发服务器钩子
      * 设置文件监听与 HMR 支持
      */
-    configureServer(server) {
+    configureServer(viteServer) {
+      server = viteServer
       ctx.setupViteServer(server)
+      server.httpServer?.once('close', onServerClose)
+    },
+    async closeBundle() {
+      // watch 构建的每轮产出都会关闭 bundle，监听保留到 closeWatcher
+      if (!watchBuild)
+        await dispose()
+    },
+    async closeWatcher() {
+      await dispose()
     },
     /**
      * 模块解析钩子

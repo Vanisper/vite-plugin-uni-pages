@@ -16,12 +16,13 @@ import { PageContext } from '../packages/core/src'
 describe('watcher matches page files only inside the configured directories', () => {
   let tmpDir: string
   let ctx: PageContext
-  let changeHandler: ((path: string) => void) | undefined
+  let changeHandler: ((event: string, path: string) => void) | undefined
 
   const watcherStub = {
     add: vi.fn(),
-    on: (event: string, handler: (path: string) => void) => {
-      if (event === 'change')
+    off: vi.fn(),
+    on: (event: string, handler: (event: string, path: string) => void) => {
+      if (event === 'all')
         changeHandler = handler
     },
   }
@@ -36,17 +37,20 @@ describe('watcher matches page files only inside the configured directories', ()
     await ctx.setupWatcher(watcherStub as any)
   })
 
-  afterAll(() => {
+  afterAll(async () => {
+    await ctx.disposeWatcher()
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('ignores sibling directories sharing the prefix', () => {
-    changeHandler!(path.join(tmpDir, 'src/pages-sub/a.vue'))
+  it('ignores sibling directories sharing the prefix', async () => {
+    changeHandler!('change', path.join(tmpDir, 'src/pages-sub/a.vue'))
+    await ctx.flushWatcher()
     expect(ctx.updatePagesJSON).not.toHaveBeenCalled()
   })
 
-  it('still reacts to files inside the configured directory', () => {
-    changeHandler!(path.join(tmpDir, 'src/pages/index.vue'))
+  it('still reacts to files inside the configured directory', async () => {
+    changeHandler!('change', path.join(tmpDir, 'src/pages/index.vue'))
+    await ctx.flushWatcher()
     expect(ctx.updatePagesJSON).toHaveBeenCalled()
   })
 })
