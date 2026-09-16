@@ -88,8 +88,8 @@ describe('插件提前准备', () => {
 
     expect(plugin.name).toBe('vite-plugin-uni-pages')
     expect(plugin).not.toHaveProperty('then')
-    await expect(Promise.all([plugin.prepare(environment), plugin.prepare({ ...environment })])).resolves.toEqual([undefined, undefined])
-    await plugin.prepare(environment)
+    await expect(Promise.all([plugin.prepare(environment), plugin.prepare({ ...environment })])).resolves.toEqual([plugin, plugin])
+    await expect(plugin.prepare(environment)).resolves.toBe(plugin)
 
     const prepared = readOutputs()
     const output = readPages()
@@ -153,6 +153,13 @@ describe('插件提前准备', () => {
 
     await expect(plugin.prepare({ root, platform: 'h5' })).rejects.toThrow(/platformSuffix/)
     expect(readOutputs()).toEqual(original)
+  })
+
+  it('prepare() 可在选项上声明 platformSuffix 并返回同一插件实例', async () => {
+    const plugin = createPlugin({ platformSuffix: undefined })
+    await expect(plugin.prepare({ platformSuffix: true })).resolves.toBe(plugin)
+    expect(readPages().pages!.map(page => page.path)).toEqual(['pages/index', 'pages/profile'])
+    await configure(plugin, { withPlatformPlugin: true })
   })
 
   it('在 Vite 初始化后拒绝再启动提前准备', async () => {

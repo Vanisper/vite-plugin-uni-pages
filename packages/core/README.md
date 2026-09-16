@@ -409,9 +409,24 @@ export default defineConfig({
 })
 ```
 
-#### 方案二：自行编写脚本，在 uni 命令前生成
+#### 方案二：在创建下游插件前调用 `prepare()`
 
-如果不想引入 `unh`，可以自行编写脚本在 `uni` 命令前生成 `pages.json`，再用 `&&` 串联或 npm `predev`/`prebuild` 钩子触发。脚本需要复刻本插件的完整流水线（加载 `pages.config.ts`、扫描页面文件、解析 `definePage` 宏、合并元数据），维护成本较高，故优先推荐方案一。
+若 Vite 配置可以是 async 的，可在返回插件列表前生成完整 `pages.json`，让工厂函数或后续钩子读到完整产物：
+
+```ts
+export default defineConfig(async () => ({
+  plugins: [
+    await UniPages().prepare({ platformSuffix: false }),
+    Uni(),
+  ],
+}))
+```
+
+详见下方「提前生成完整页面配置」。若官方 CLI 在加载 Vite 配置之前就读取 `pages.json`，请继续用方案一。
+
+#### 方案三：自行编写脚本，在 uni 命令前生成
+
+如果不想引入 `unh`，也可以自行编写脚本在 `uni` 命令前生成 `pages.json`，再用 `&&` 串联或 npm `predev`/`prebuild` 钩子触发。脚本需要复刻本插件的完整流水线，维护成本较高，故优先推荐方案一。
 
 ### 支持 JSX/TSX 吗？
 
@@ -511,17 +526,22 @@ import Uni from '@uni-helper/plugin-uni'
 import UniPages from '@uni-helper/vite-plugin-uni-pages'
 import { defineConfig } from 'vite'
 
-export default defineConfig(async () => {
-  const pages = UniPages({ platformSuffix: false })
-  await pages.prepare()
-
-  return {
-    plugins: [pages, Uni()],
-  }
-})
+export default defineConfig(async () => ({
+  plugins: [
+    await UniPages().prepare({ platformSuffix: false }),
+    Uni(),
+  ],
+}))
 ```
 
-`UniPages()` 仍同步返回 Vite 插件。`prepare({ root?, platform? })` 完成配置加载、页面扫描、合并，以及 `pages.json` 和声明文件的写入；Vite 初始化时复用同一个上下文。并发或重复调用会复用同一准备结果，失败后可重试。
+也可以先拿到插件再准备：
+
+```ts
+const pages = UniPages({ platformSuffix: false })
+await pages.prepare()
+```
+
+`UniPages()` 仍同步返回 Vite 插件。`prepare({ root?, platform?, platformSuffix? })` 完成配置加载、页面扫描、合并，以及 `pages.json` 和声明文件的写入，并返回同一个插件实例。Vite 初始化时复用已准备的上下文。并发或重复调用会复用同一准备结果，失败后可重试。
 
 - `root` 默认使用 `VITE_ROOT_DIR`，否则使用当前工作目录；`platform` 默认取 uni-env 的当前平台。指定的值须与最终 Vite 环境一致。
 - 提前准备时必须显式设置 `platformSuffix`；普通初始化省略此选项时，仍自动检测 `vite-plugin-uni-platform`。开启后会统一处理主包、分包与 TabBar 的平台后缀，再确定首页和声明中的路由。

@@ -33,17 +33,32 @@ export * from './pipeline'
 export type * from './types'
 export type * from '@uni-helper/uni-pages-types'
 
+/**
+ * `prepare()` 的调用选项
+ *
+ * `platformSuffix` 须在此处或 `UniPages({ platformSuffix })` 中显式声明，
+ * 以便在 Vite 尚未检测插件列表前决定是否应用 UniPlatform 后缀规则。
+ */
+export interface PrepareOptions extends PipelineOverrides {
+  /**
+   * 是否采用 UniPlatform 的文件名后缀规则
+   *
+   * 省略时回退到 `UniPages({ platformSuffix })`；两者都未设置时拒绝准备。
+   */
+  platformSuffix?: boolean
+}
+
 /** 支持提前准备页面配置的 Vite 插件 */
 export interface UniPagesPlugin extends Plugin {
   /**
-   * 提前生成 pages.json 与声明文件，完成后可供下游插件读取
+   * 提前生成 pages.json 与声明文件，完成后返回自身供下游插件读取
    *
    * @description
    * - 在 Vite 初始化前调用，并显式设置 platformSuffix
    * - 同一环境的并发或重复调用复用结果；失败后可重试
    * - Vite 接管时校验根目录、平台、输入文件与生成产物未变化
    */
-  prepare: (overrides?: PipelineOverrides) => Promise<void>
+  prepare: (overrides?: PrepareOptions) => Promise<UniPagesPlugin>
 }
 
 /**
@@ -64,7 +79,7 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): UniPagesPlugi
   let server: ViteDevServer | undefined
   let watchBuild = false
   let resolved = false
-  let preparePromise: Promise<void> | undefined
+  let preparePromise: Promise<UniPagesPlugin> | undefined
   let prepared: Awaited<ReturnType<typeof prepareContext>> | undefined
   let prepareEnvironment: { root: string, platform: string, platformSuffix: boolean } | undefined
 
@@ -97,18 +112,19 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): UniPagesPlugi
   )
   checkPagesJsonFileSync(resolvedPagesJSONPath)
 
-  return {
+  const plugin: UniPagesPlugin = {
     name: 'vite-plugin-uni-pages',
     enforce: 'pre',
     prepare(overrides = {}) {
       if (resolved)
         return Promise.reject(new Error('[vite-plugin-uni-pages] prepare() must run before configResolved'))
-      if (typeof userOptions.platformSuffix !== 'boolean')
+      const platformSuffix = overrides.platformSuffix ?? userOptions.platformSuffix
+      if (typeof platformSuffix !== 'boolean')
         return Promise.reject(new Error('[vite-plugin-uni-pages] prepare() requires an explicit platformSuffix option'))
       const environment = {
         root: normalizePath(path.resolve(overrides.root ?? process.env.VITE_ROOT_DIR ?? process.cwd())),
         platform: overrides.platform ?? uniEnvPlatform,
-        platformSuffix: userOptions.platformSuffix,
+        platformSuffix,
       }
       if (preparePromise) {
         if (JSON.stringify(environment) !== JSON.stringify(prepareEnvironment))
@@ -117,11 +133,12 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): UniPagesPlugi
       }
       prepareEnvironment = environment
       preparePromise = (async () => {
-        const candidate = new PageContext(userOptions, environment.root, environment.platform)
+        const candidate = new PageContext({ ...userOptions, platformSuffix }, environment.root, environment.platform)
         candidate.setLogger(createLogger(undefined, { prefix: '[vite-plugin-uni-pages]' }))
         const snapshot = await prepareContext(candidate)
         ctx = candidate
         prepared = snapshot
+        return plugin
       })().catch((error: unknown) => {
         preparePromise = undefined
         prepareEnvironment = undefined
@@ -257,6 +274,8 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): UniPagesPlugi
         return ctx.virtualModule()
     },
   }
+
+  return plugin
 }
 
 export default VitePluginUniPages
