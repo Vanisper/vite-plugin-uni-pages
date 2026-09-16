@@ -612,7 +612,16 @@ export class PageContext {
         return { ...page, path: `${root}/${page.path}` }
       })
       const parsedPages = (await this.parsePages(pages, 'sub', overrides))
-        .map(page => ({ ...page, path: normalizePath(path.relative(root, page.path)) }))
+        .map(page => ({
+          ...page,
+          // 相对路径以绝对路径计算：自定义 root 与扫描路径都相对 outDir，
+          // 但外部目录的扫描路径以 `../` 开头，直接 path.relative(root, page.path)
+          // 会把两边当成同一棵树下的相对段，得到错误的页面路径
+          path: normalizePath(path.relative(
+            path.resolve(this.basePath, root),
+            path.resolve(this.basePath, page.path),
+          )),
+        }))
       packagesByRoot.set(root, {
         root,
         pages: parsedPages,
