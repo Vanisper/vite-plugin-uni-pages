@@ -29,7 +29,7 @@ export function configWatchDirectory(filepath: string): string {
   let directory = path.dirname(filepath)
   while (!existsSync(directory) && path.dirname(directory) !== directory)
     directory = path.dirname(directory)
-  return directory
+  return normalizePath(directory)
 }
 
 /** 配置加载结果及本次成功求值涉及的文件 */

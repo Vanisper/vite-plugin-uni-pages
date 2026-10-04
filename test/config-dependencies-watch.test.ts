@@ -41,6 +41,7 @@ afterEach(async () => {
 interface WatcherSession {
   watcher: FSWatcher
   scheduledUpdates: () => number
+  registrationCount: () => number
   settleUpdates: () => Promise<void>
   save: (file: string, content: string, stage?: string) => Promise<void>
   remove: (file: string) => Promise<void>
@@ -52,7 +53,28 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
     await Promise.allSettled(updates.mock.results.map(result => result.value))
   }
   let watched: FSWatcher | undefined
+  let registrationCount = (): number => 0
   const lastChanges = new Map<string, number>()
+  const history = new Map<string, object[]>()
+  const record = (kind: string, event: string, file: string, watchedPath?: string): void => {
+    const key = path.basename(file)
+    const events = history.get(key) || []
+    events.push({ time: Math.round(performance.now()), kind, event, file: normalizePath(file), watchedPath })
+    history.set(key, events.slice(-20))
+  }
+  const diagnose = (stage: string, file: string): string => {
+    const absolute = normalizePath(path.join(root, file))
+    const parent = normalizePath(path.dirname(absolute))
+    const entries = Object.entries(watched!.getWatched())
+      .filter(([directory]) => normalizePath(directory) === parent)
+    return JSON.stringify({
+      stage,
+      file: absolute,
+      exists: fs.existsSync(absolute),
+      parentEntries: entries,
+      events: history.get(path.basename(file)) || [],
+    })
+  }
   let ready!: () => void
   const readyPromise = new Promise<void>((resolve) => {
     ready = resolve
@@ -60,9 +82,16 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
   const setup = PageContext.prototype.setupWatcher
   vi.spyOn(PageContext.prototype, 'setupWatcher').mockImplementation(async function (this: PageContext, watcher) {
     watched = watcher as unknown as FSWatcher
+    const add = vi.spyOn(watched, 'add')
+    registrationCount = () => add.mock.calls.length
     watched.on('change', file => lastChanges.set(normalizePath(file), performance.now()))
+    watched.on('all', (event, file) => record('all', event, file))
+    watched.on('raw', (event, file, details) => record('raw', event, file, details?.watchedPath))
     watched.once('ready', ready)
-    return setup.call(this, watcher)
+    const result = setup.call(this, watcher)
+    if (mode === 'dev')
+      expect(add).not.toHaveBeenCalled()
+    return result
   })
   const plugin = UniPages({ dts: true })
   if (mode === 'dev') {
@@ -114,8 +143,12 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
     }
     watched!.on('all', onEvent)
     try {
+      record('write', stage, absolute)
       write(file, content)
       await vi.waitFor(() => expect(observed, `${stage}: watcher event for ${file}`).toBe(true), { timeout: 10000, interval: 10 })
+    }
+    catch (error) {
+      throw new Error(`Config watcher failed: ${diagnose(stage, file)}`, { cause: error })
     }
     finally {
       watched!.off('all', onEvent)
@@ -130,16 +163,20 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
     }
     watched!.on('unlink', onUnlink)
     try {
+      record('remove', 'unlink', absolute)
       fs.unlinkSync(path.join(root, file))
       // 加载失败可能先于原生删除事件；确认监听器完成删除后才能重建同一路径
       await vi.waitFor(() => expect(observed, `unlink event for ${file}`).toBe(true), { timeout: 10000, interval: 10 })
       await settleUpdates()
     }
+    catch (error) {
+      throw new Error(`Config watcher failed: ${diagnose('remove', file)}`, { cause: error })
+    }
     finally {
       watched!.off('unlink', onUnlink)
     }
   }
-  return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, settleUpdates, save, remove }
+  return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, registrationCount, settleUpdates, save, remove }
 }
 
 describe('真实配置依赖 watcher', () => {
@@ -148,16 +185,18 @@ describe('真实配置依赖 watcher', () => {
     write('node_modules/unused/index.js', 'export default {}')
     write('old-leaf.ts', `export const suffix = ''`)
     write('pages.config.ts', `import { title } from './leaf.ts'; import { suffix } from './old-leaf.ts'; export default { globalStyle: { navigationBarTitleText: title + suffix } }`)
-    const { watcher, scheduledUpdates, settleUpdates, save, remove } = await start(mode)
+    const { watcher, scheduledUpdates, registrationCount, settleUpdates, save, remove } = await start(mode)
     await waitTitle('initial')
     expect(Object.keys(watcher.getWatched()).some(directory => normalizePath(directory).includes('/node_modules'))).toBe(false)
     expect(fs.readFileSync(path.join(root, 'uni-pages.d.ts'), 'utf8')).toContain('pages/index')
     await save('leaf.ts', `export const title = 'changed'`)
     await waitTitle('changed')
+    const registrations = registrationCount()
     await save('next.json', '{"title":"next"}', 'create JSON dependency')
     await save('pages.config.ts', `import value from './next.json'; export default { globalStyle: { navigationBarTitleText: value.title } }`)
     await waitTitle('next')
     await settleUpdates()
+    expect(registrationCount()).toBe(registrations)
     let before = 0
     let unusedEventUpdates: number | undefined
     const isUnusedFile = (file: string): boolean => normalizePath(file) === normalizePath(path.join(root, 'old-leaf.ts'))
