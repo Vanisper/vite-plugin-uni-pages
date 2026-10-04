@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { parse } from 'comment-json'
-import { build, createServer } from 'vite'
+import { build, createServer, normalizePath } from 'vite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import UniPages, { PageContext } from '../packages/core/src'
 import { isPageDirectoryEvent, isPageFileInDirectories, resolvePageWatchDirectories } from '../packages/core/src/directories'
@@ -146,7 +146,7 @@ describe('目录监听边界', () => {
     expect(isPageFileInDirectories(path.join(root, 'src/packages/account/pages/__private__/a.vue'), ctx.options)).toBe(false)
     expect(isPageDirectoryEvent(path.join(root, 'src/packages/hidden/pages'), ctx.options)).toBe(false)
     expect(isPageDirectoryEvent(path.join(root, 'src/components'), ctx.options)).toBe(false)
-    expect(resolvePageWatchDirectories(ctx.options)).toEqual([root])
+    expect(resolvePageWatchDirectories(ctx.options)).toEqual([normalizePath(root)])
   })
 
   it('项目根外的缺失目录使用外部已有祖先', () => {
@@ -154,7 +154,7 @@ describe('目录监听边界', () => {
     const app = path.join(root, 'app')
     fs.mkdirSync(app)
     const ctx = new PageContext({ dir: 'pages', subPackages: ['../external/deep/*/pages'] }, app)
-    expect(resolvePageWatchDirectories(ctx.options)).toEqual([root])
+    expect(resolvePageWatchDirectories(ctx.options)).toEqual([normalizePath(root)])
     expect(isPageFileInDirectories(path.join(root, 'external/deep/account/pages/a.vue'), ctx.options)).toBe(true)
   })
 
@@ -176,7 +176,11 @@ describe('目录监听边界', () => {
     })
     page(root, 'pages/a.vue', '新 A')
     page(root, 'pages/b.vue', '新 B')
-    await Promise.all([ctx.updatePagesJSON(), ctx.updatePagesJSON(path.join(root, 'pages/a.vue')), ctx.updatePagesJSON(path.join(root, 'pages/b.vue'))])
+    await Promise.all([
+      ctx.updatePagesJSON(),
+      ctx.updatePagesJSON(normalizePath(path.join(root, 'pages/a.vue'))),
+      ctx.updatePagesJSON(normalizePath(path.join(root, 'pages/b.vue'))),
+    ])
     expect(maximum).toBe(1)
     expect(read(root).pages.map((page: any) => page.style.navigationBarTitleText).sort()).toEqual(['新 A', '新 B'])
   })
