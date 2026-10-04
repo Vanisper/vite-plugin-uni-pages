@@ -286,17 +286,19 @@ export class PageContext {
         insertFinalNewline: this.options.insertFinalNewline,
       },
     })
+    if (!result)
+      throw new Error(`[vite-plugin-uni-pages] Failed to acquire the pages.json file lock: ${this.resolvedPagesJSONPath}`)
 
     // 声明文件写的是另一个文件（uni-pages.d.ts），不需要和 pages.json
     // 用同一把锁。保持原有行为：不管内容变没变，都在 pages.json 计算
     // 之后运行
-    this.generateDeclaration()
+    await this.generateDeclaration()
 
-    if (result?.updated) {
+    if (result.updated) {
       this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
     }
 
-    return result?.updated ?? false
+    return result.updated
   }
 
   /**
