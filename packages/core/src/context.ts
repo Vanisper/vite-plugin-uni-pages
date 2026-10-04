@@ -12,6 +12,7 @@ import { loadConfig } from 'unconfig'
 import { normalizePath } from 'vite'
 import { RESOLVED_MODULE_ID_VIRTUAL } from './constant'
 import { writeDeclaration } from './declaration'
+import { isPageDirectoryEvent, isPageFileInDirectories, refreshPageDirectories, resolvePageWatchDirectories } from './directories'
 import { checkPagesJsonFileSync, getPageFiles, isTargetFile, resolvePagesJsonPath } from './files'
 import { debug } from './logger'
 import { resolveOptions } from './options'
@@ -28,6 +29,8 @@ import { writePagesJson } from './pages-json'
  */
 export class PageContext {
   private _server: ViteDevServer | undefined
+  private updateQueue: Promise<unknown> = Promise.resolve()
+  private readonly watcherDisposers = new Map<FSWatcher, () => void>()
 
   /** 从用户配置文件（pages.config.ts）解析出的配置对象 */
   pagesGlobConfig: PagesConfig | undefined
@@ -117,6 +120,7 @@ export class PageContext {
    * 信息。步骤顺序只维护在这里，调用方和测试都不用关心。
    */
   async scanAndMerge(): Promise<void> {
+    refreshPageDirectories(this.options)
     await this.scanPages()
     await this.scanSubPages()
     await this.mergePageMetaData()
@@ -142,59 +146,61 @@ export class PageContext {
    * @param watcher - chokidar 文件监听器实例
    */
   async setupWatcher(watcher: FSWatcher): Promise<void> {
-    watcher.add(this.pagesConfigSourcePaths)
-    const targetDirs = [...this.options.dirs, ...this.options.subPackages].map(v => normalizePath(path.resolve(this.root, v)))
-    // 前缀判断要吃到目录边界：'src/pages' 不能把隔壁的
-    // 'src/pages-sub/…' 也认成自己的页面（Vite 的 watcher 默认盯整个
-    // 项目，这种兄弟目录的变更事件是会进来的）
-    const isWatchedPageFile = (filePath: string): boolean => {
-      const absolute = normalizePath(path.resolve(this.root, filePath))
-      return isTargetFile(filePath) && targetDirs.some(v => absolute === v || absolute.startsWith(`${v}/`))
+    if (this.watcherDisposers.has(watcher))
+      return
+
+    const handleFile = (event: 'add' | 'change' | 'unlink', file: string): void => {
+      const absolute = normalizePath(path.resolve(this.root, file))
+      const isConfig = this.pagesConfigSourcePaths.includes(absolute)
+      if (!isConfig && (!isTargetFile(absolute) || !isPageFileInDirectories(absolute, this.options)))
+        return
+      this.updateFromWatcher(event !== 'unlink' && !isConfig ? absolute : undefined)
     }
-
-    watcher.on('add', async (path) => {
-      path = normalizePath(path)
-      if (!isWatchedPageFile(path))
-        return
-
-      debug.pages(`File added: ${path}`)
-      if (await this.updatePagesJSON())
-        this.onUpdate()
+    const onAdd = (file: string): void => handleFile('add', file)
+    const onChange = (file: string): void => handleFile('change', file)
+    const onUnlink = (file: string): void => handleFile('unlink', file)
+    const onDirectory = (directory: string): void => {
+      if (isPageDirectoryEvent(directory, this.options))
+        this.updateFromWatcher()
+    }
+    // 初始扫描期间新增的路径可能被 ignoreInitial 吞掉，ready 后再收敛一次
+    const onReady = (): void => this.updateFromWatcher()
+    watcher.on('add', onAdd)
+    watcher.on('change', onChange)
+    watcher.on('unlink', onUnlink)
+    watcher.on('addDir', onDirectory)
+    watcher.on('unlinkDir', onDirectory)
+    watcher.on('ready', onReady)
+    this.watcherDisposers.set(watcher, () => {
+      watcher.off('add', onAdd)
+      watcher.off('change', onChange)
+      watcher.off('unlink', onUnlink)
+      watcher.off('addDir', onDirectory)
+      watcher.off('unlinkDir', onDirectory)
+      watcher.off('ready', onReady)
     })
+    const serverRoot = (this._server?.watcher as unknown) === watcher ? normalizePath(this._server!.config.root) : undefined
+    // Vite 已递归监听项目根，重复 add 会重新开始 ignoreInitial 扫描
+    const directories = resolvePageWatchDirectories(this.options).filter(dir => !serverRoot || (dir !== serverRoot && !dir.startsWith(`${serverRoot}/`)))
+    watcher.add([...directories, ...this.pagesConfigSourcePaths])
+  }
 
-    watcher.on('change', async (path) => {
-      path = normalizePath(path)
-      // 配置文件按绝对路径监听；先判断它，配置的变更就不会被下面的
-      // 页面文件判断漏掉。两边都归一化过斜杠（sources 在加载配置时、
-      // 事件路径在上面），Windows 上斜杠方向不一致也不会错过配置变更。
-      // 已知边界（权衡后接受）：sources 在启动时定死：启动时配置文件
-      // 还不存在，loadConfig 返回的 sources 是空数组（已实测），
-      // watcher.add 拿到空列表，之后再创建的配置文件永远不被监听，
-      // 需要重启开发服务器才生效。
-      if (this.pagesConfigSourcePaths.includes(path)) {
-        debug.pages(`Config source changed: ${path}`)
-        if (await this.updatePagesJSON())
-          this.onUpdate()
-        return
-      }
+  /** 解绑本上下文的监听回调，并等待已开始的生成结束 */
+  async disposeWatchers(): Promise<void> {
+    for (const dispose of this.watcherDisposers.values())
+      dispose()
+    this.watcherDisposers.clear()
+    this._server = undefined
+    await this.updateQueue.catch(() => {})
+  }
 
-      path = normalizePath(path)
-      if (!isWatchedPageFile(path))
-        return
-
-      debug.pages(`File changed: ${path}`)
-      if (await this.updatePagesJSON(path))
+  private updateFromWatcher(filepath?: string): void {
+    void this.updatePagesJSON(filepath).then((updated) => {
+      if (updated)
         this.onUpdate()
-    })
-
-    watcher.on('unlink', async (path) => {
-      path = normalizePath(path)
-      if (!isWatchedPageFile(path))
-        return
-
-      debug.pages(`File removed: ${path}`)
-      if (await this.updatePagesJSON())
-        this.onUpdate()
+    }).catch((error) => {
+      this.logger?.error(`[vite-plugin-uni-pages] ${error instanceof Error ? error.message : String(error)}`)
+      debug.error(error)
     })
   }
 
@@ -224,7 +230,13 @@ export class PageContext {
    * @param filepath - 发生变更的文件路径，用于增量更新判断
    * @returns pages.json 是否成功更新
    */
-  async updatePagesJSON(filepath?: string): Promise<boolean> {
+  updatePagesJSON(filepath?: string): Promise<boolean> {
+    const update = this.updateQueue.catch(() => {}).then(() => this.generatePagesJSON(filepath))
+    this.updateQueue = update
+    return update
+  }
+
+  private async generatePagesJSON(filepath?: string): Promise<boolean> {
     if (filepath) {
       const page = this.findPage(filepath)
       if (page) {
@@ -242,6 +254,7 @@ export class PageContext {
     this.options.onAfterLoadUserConfig(this.pagesGlobConfig)
 
     if (this.options.mergePages) {
+      refreshPageDirectories(this.options)
       this.options.onBeforeScanPages()
       await this.scanPages()
       await this.scanSubPages()
@@ -290,7 +303,7 @@ export class PageContext {
     // 声明文件写的是另一个文件（uni-pages.d.ts），不需要和 pages.json
     // 用同一把锁。保持原有行为：不管内容变没变，都在 pages.json 计算
     // 之后运行
-    this.generateDeclaration()
+    await this.generateDeclaration()
 
     if (result?.updated) {
       this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
@@ -557,9 +570,10 @@ export class PageContext {
       })
       const parsedPages = (await this.parsePages(pages, 'sub', overrides))
         .map(page => ({ ...page, path: normalizePath(path.relative(root, page.path)) }))
+      const previous = this.options.dynamicSubPackageRoots.has(root) ? packagesByRoot.get(root) : undefined
       packagesByRoot.set(root, {
         root,
-        pages: parsedPages,
+        pages: previous ? mergePageMetaDataArray([...previous.pages, ...parsedPages]) : parsedPages,
         // 为该子包保留用户配置中的 plugins 配置
         ...(globPackage?.plugins && { plugins: globPackage.plugins }),
       })

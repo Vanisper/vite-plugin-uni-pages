@@ -1,10 +1,10 @@
+import type { FSWatcher } from 'chokidar'
 import type { Plugin } from 'vite'
 import type { UserOptions } from './types'
-import path from 'node:path'
 import process from 'node:process'
 import chokidar from 'chokidar'
 import MagicString from 'magic-string'
-import { createLogger, normalizePath } from 'vite'
+import { createLogger } from 'vite'
 import {
   FILE_EXTENSIONS,
   MODULE_ID_VIRTUAL,
@@ -42,6 +42,7 @@ export type * from '@uni-helper/uni-pages-types'
  */
 export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
   let ctx: PageContext
+  let buildWatcher: FSWatcher | undefined
 
   // config.root 要到 configResolved 才知道，这里先用和 Vite 一样的根
   // 目录规则算个大概，路径规则只维护一份。注意：Vite 的 root 和 cwd
@@ -73,12 +74,12 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
       ctx.setLogger(logger)
       await ctx.updatePagesJSON()
 
-      if (config.command === 'build') {
-        if (config.build.watch) {
-          // 必须相对真实的 Vite root 解析：否则 chokidar 会按 process.cwd()
-          // 解释相对目录，在 root 与 cwd 不一致时监听到错误的目录
-          ctx.setupWatcher(chokidar.watch([...ctx.options.dirs, ...ctx.options.subPackages].map(v => normalizePath(path.resolve(config.root, v)))))
-        }
+      if (config.command === 'build' && config.build.watch) {
+        buildWatcher = chokidar.watch([], {
+          ignoreInitial: true,
+          ignored: file => ['node_modules', '.git'].some(dir => ctx.options.exclude.includes(dir) && file.split(/[/\\]/).includes(dir)),
+        })
+        await ctx.setupWatcher(buildWatcher)
       }
     },
     /**
@@ -126,6 +127,15 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
      */
     configureServer(server) {
       ctx.setupViteServer(server)
+    },
+    async closeWatcher() {
+      await ctx?.disposeWatchers()
+      await buildWatcher?.close()
+      buildWatcher = undefined
+    },
+    async closeBundle() {
+      if (!buildWatcher)
+        await ctx?.disposeWatchers()
     },
     /**
      * 模块解析钩子

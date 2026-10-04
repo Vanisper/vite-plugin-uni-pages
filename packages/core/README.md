@@ -246,12 +246,12 @@ interface UserOptions {
   /**
    * 分包页面目录的根目录列表
    * 用于 uni-app 的分包加载功能
-   * 支持字符串格式（目录路径）或对象格式（自定义 pages.json 中的 root）
+   * 字符串和对象的 dir 均支持 glob，root 可通过同步回调计算
    * 更多上下文参考 <https://github.com/uni-helper/vite-plugin-uni-pages/issues/271>
    * @default []
    * @since 0.1.8
    */
-  subPackages?: (string | { dir: string, root: string })[]
+  subPackages?: (string | { dir: string, root: string | ((dir: string) => string) })[]
 
   /**
    * pages.json 所在目录
@@ -415,6 +415,48 @@ export default defineConfig({
 
 文件名内不能带有额外的 `.` 分隔符，如 `index.v1.vue` 不合法。这是小程序的限制，并非本插件的限制。
 
+### 如何自动发现分包？
+
+`subPackages` 的字符串和对象 `dir` 都支持目录 glob。例如，`subPackages: ['src/packages/*/pages']` 会把每个匹配的 `pages` 目录作为分包目录，生成的默认 `root` 相对 `outDir` 计算。每条规则的匹配结果按路径排序，规则之间保留配置顺序。
+
+如需让分包 `root` 指向扫描目录的上级，可以使用同步回调：
+
+```ts
+import { posix } from 'node:path'
+import UniPages from '@uni-helper/vite-plugin-uni-pages'
+
+UniPages({
+  subPackages: [{
+    dir: 'src/packages/*/pages',
+    root: dir => posix.relative('src', posix.dirname(dir)),
+  }],
+})
+```
+
+对于 `src/packages/account/pages/profile.vue`，回调收到 `src/packages/account/pages`，生成：
+
+```json
+{
+  "subPackages": [{
+    "root": "packages/account",
+    "pages": [{ "path": "pages/profile" }]
+  }]
+}
+```
+
+回调参数始终相对 Vite 项目 `root`，使用 `/` 分隔且不带末尾斜杠；传入绝对 glob 时也遵守这一规则。返回值必须是非空相对路径，不能是 `.`、绝对路径或包含 `..`。每次重新发现目录时都会调用回调，不能返回 Promise。
+
+目录与路径规则：
+
+- glob 和回调规则匹配到相同物理目录时会去重；同一目录得到不同的 `root` 会报错
+- 多个目录通过 glob 或回调得到同一 `root` 时会合并页面，用户配置中的页面覆盖和 `plugins` 继续生效
+- 排除目录或文件使用 `exclude`；`subPackages` 不接受以 `!` 开头的否定规则
+- 字符串形式的自定义 `root` 保留既有路径计算规则；设置 `root` 不会移动页面文件
+
+H5 开发服务器和 `vite build --watch` 都会重新发现主包 `dir` 与分包目录，支持启动时目录尚不存在，以及运行中的新增、删除、重命名和重建。空目录会被发现，在包含页面之前不生成空分包。目录可以位于 Vite 项目根目录之外，路径仍相对 Vite `root` 解析，不受命令执行目录影响。`mergePages: false` 时不扫描或监听页面目录；H5 的监听范围仍受 Vite `server.watch` 配置约束。
+
+动态发现会更新 `pages.json`。如果下游插件只在创建时缓存分包信息，它仍需要重启才能使用新增分包；自动重新发现不会改变其他插件的缓存策略。
+
 ### 支持 monorepo 吗？
 
 在 monorepo 项目中，如果页面分布在多个 package 中，可以使用 `subPackages` 配置的对象格式来自定义生成的 `root` 路径。
@@ -544,7 +586,8 @@ macro.ts          definePage 宏解析 — SFC 解析、单个 script 块失败�
                   对象 / 函数 / 异步函数三种形态求值
 condition.ts      按平台写配置 — define().ifdef()/.ifndef()，扫描时就算成当前平台的普通对象
 page.ts           页面实体 — 文件读取、宏求值、变更检测、跳过状态
-options.ts        选项解析 — 默认值合并、glob 目录解析、subPackages root 映射
+options.ts        选项解析 — 默认值合并与扫描规则保留
+directories.ts    目录发现 — glob 展开、subPackages root 映射与监听边界
 declaration.ts    uni-pages.d.ts 生成，为导航 API 提供路径类型检查
 config.ts         defineUniPages 辅助函数 + 类型重导出
 constant.ts       常量 — 虚拟模块 ID、页面文件扩展名（vue / nvue / uvue）
