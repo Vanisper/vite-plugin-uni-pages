@@ -4,7 +4,7 @@ import type { UserOptions } from './types'
 import process from 'node:process'
 import chokidar from 'chokidar'
 import MagicString from 'magic-string'
-import { createLogger } from 'vite'
+import { createLogger, normalizePath } from 'vite'
 import {
   FILE_EXTENSIONS,
   MODULE_ID_VIRTUAL,
@@ -75,9 +75,14 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
       await ctx.updatePagesJSON()
 
       if (config.command === 'build' && config.build.watch) {
+        const lockDirectory = normalizePath(`${ctx.resolvedPagesJSONPath}.lock`)
         buildWatcher = chokidar.watch([], {
           ignoreInitial: true,
-          ignored: file => ['node_modules', '.git'].some(dir => ctx.options.exclude.includes(dir) && file.split(/[/\\]/).includes(dir)),
+          ignored: (file) => {
+            const normalized = normalizePath(file)
+            return normalized === lockDirectory || normalized.startsWith(`${lockDirectory}/`)
+              || ['node_modules', '.git'].some(dir => ctx.options.exclude.includes(dir) && normalized.split('/').includes(dir))
+          },
         })
         await ctx.setupWatcher(buildWatcher)
       }

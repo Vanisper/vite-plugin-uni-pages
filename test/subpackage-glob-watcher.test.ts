@@ -1,3 +1,4 @@
+import type { FSWatcher } from 'vite'
 import type { UserOptions } from '../packages/core/src'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -13,7 +14,7 @@ vi.hoisted(() => vi.stubEnv('UNI_PLATFORM', 'h5'))
 const roots: string[] = []
 const closers: (() => Promise<unknown>)[] = []
 function fixture(): string {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-glob-watch-')))
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-glob-watch-')))
   roots.push(root)
   return root
 }
@@ -25,12 +26,16 @@ function page(root: string, name: string, title = name): void {
 function read(root: string): any {
   return parse(fs.readFileSync(path.join(root, 'pages.json'), 'utf8'))
 }
+function watchedFiles(watcher: FSWatcher, directory: string): string[] | undefined {
+  return Object.entries(watcher.getWatched()).find(([dir]) => normalizePath(dir) === normalizePath(directory))?.[1]
+}
 async function waitForPackages(root: string, expected: string[]): Promise<void> {
   await vi.waitFor(() => expect((read(root).subPackages ?? []).map((pkg: any) => pkg.root)).toEqual(expected), { timeout: 10000, interval: 25 })
 }
 afterEach(async () => {
   for (const close of closers.splice(0).reverse())
     await close()
+  vi.restoreAllMocks()
   vi.unstubAllEnvs()
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true })
@@ -43,11 +48,20 @@ const options: UserOptions = {
   subPackages: [{ dir: 'nested/deep/packages/*/pages', root: dir => path.posix.dirname(dir) }],
 }
 
-async function start(root: string, mode: 'serve' | 'build', overrides: UserOptions = {}): Promise<() => Promise<unknown>> {
+async function start(root: string, mode: 'serve' | 'build', overrides: UserOptions = {}): Promise<{ close: () => Promise<unknown>, watcher: FSWatcher, events: string[] }> {
   vi.stubEnv('VITE_ROOT_DIR', root)
   vi.stubEnv('UNI_PLATFORM', 'h5')
   fs.writeFileSync(path.join(root, 'pages.config.json'), JSON.stringify({ pages: [{ path: 'home', type: 'home' }] }))
   let scans = 0
+  const updates = vi.spyOn(PageContext.prototype, 'updatePagesJSON')
+  let observedWatcher: FSWatcher | undefined
+  const events: string[] = []
+  const setup = PageContext.prototype.setupWatcher
+  const setupSpy = vi.spyOn(PageContext.prototype, 'setupWatcher').mockImplementation(function (this: PageContext, watcher) {
+    observedWatcher = watcher as unknown as FSWatcher
+    observedWatcher.on('all', (event, file) => events.push(`${event}:${normalizePath(path.relative(root, file))}`))
+    return setup.call(this, watcher)
+  })
   const plugin = UniPages({
     ...options,
     ...overrides,
@@ -61,7 +75,11 @@ async function start(root: string, mode: 'serve' | 'build', overrides: UserOptio
     const close = () => server.close()
     closers.push(close)
     await vi.waitFor(() => expect(scans).toBeGreaterThanOrEqual(2), { timeout: 10000 })
-    return close
+    await vi.waitFor(() => expect(watchedFiles(observedWatcher!, root)).toContain('pages.config.json'), { timeout: 10000 })
+    await Promise.allSettled(updates.mock.results.map(result => result.value))
+    updates.mockRestore()
+    setupSpy.mockRestore()
+    return { close, watcher: observedWatcher!, events }
   }
   fs.writeFileSync(path.join(root, 'entry.js'), 'export const example = 1')
   const watcher = await build({
@@ -77,14 +95,18 @@ async function start(root: string, mode: 'serve' | 'build', overrides: UserOptio
   closers.push(close)
   await vi.waitFor(() => expect(fs.existsSync(path.join(root, 'dist/entry.mjs'))).toBe(true), { timeout: 10000 })
   await vi.waitFor(() => expect(scans).toBeGreaterThanOrEqual(2), { timeout: 10000 })
-  return close
+  await vi.waitFor(() => expect(watchedFiles(observedWatcher!, root)).toContain('pages.config.json'), { timeout: 10000 })
+  await Promise.allSettled(updates.mock.results.map(result => result.value))
+  updates.mockRestore()
+  setupSpy.mockRestore()
+  return { close, watcher: observedWatcher!, events }
 }
 
 describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
   it('发现多级缺失目录，并处理新增、重命名、删除、重建和页面元数据修改', async () => {
     const root = fixture()
     let foundEmptyDirectory = false
-    await start(root, mode, {
+    const { events } = await start(root, mode, {
       onAfterScanPages: (_, subPages) => {
         foundEmptyDirectory ||= subPages.has('nested/deep/packages/account/pages')
       },
@@ -96,14 +118,24 @@ describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
     page(root, 'nested/deep/packages/account/pages/profile.vue', '初始')
     await waitForPackages(root, ['nested/deep/packages/account'])
     expect(read(root).subPackages[0].pages[0].path).toBe('pages/profile')
-    fs.renameSync(path.join(root, 'nested/deep/packages/account'), path.join(root, 'nested/deep/packages/profile'))
+    await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/account/pages/profile.vue'), { timeout: 10000 })
+    // Windows 上扫描句柄可能短暂占用目录；重试仍要求真实重命名成功
+    await vi.waitFor(() => fs.promises.rename(path.join(root, 'nested/deep/packages/account'), path.join(root, 'nested/deep/packages/profile')), { timeout: 5000, interval: 50 })
     await waitForPackages(root, ['nested/deep/packages/profile'])
-    fs.rmSync(path.join(root, 'nested'), { recursive: true })
+    await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/profile/pages/profile.vue'), { timeout: 10000 })
+    await fs.promises.rm(path.join(root, 'nested'), { recursive: true, maxRetries: 10, retryDelay: 50 })
     await waitForPackages(root, [])
+    // pages.json 可先由目录事件更新，等待文件删除事件后再开始重建阶段
+    await vi.waitFor(() => expect(events).toContain('unlink:nested/deep/packages/profile/pages/profile.vue'), { timeout: 10000 })
+    events.length = 0
     page(root, 'nested/deep/packages/account/pages/profile.vue', '重建')
     page(root, 'nested/deep/packages/account/pages/detail.vue', '详情')
     await waitForPackages(root, ['nested/deep/packages/account'])
     await vi.waitFor(() => expect(read(root).subPackages[0].pages).toHaveLength(2))
+    await vi.waitFor(() => {
+      expect(events).toContain('add:nested/deep/packages/account/pages/profile.vue')
+      expect(events).toContain('add:nested/deep/packages/account/pages/detail.vue')
+    }, { timeout: 10000 })
     page(root, 'nested/deep/packages/account/pages/profile.vue', '修改一')
     page(root, 'nested/deep/packages/account/pages/detail.vue', '修改二')
     await vi.waitFor(() => expect(read(root).subPackages[0].pages.map((page: any) => page.style.navigationBarTitleText).sort()).toEqual(['修改一', '修改二']), { timeout: 10000 })
@@ -113,7 +145,7 @@ describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
 
   it('关闭后不再更新 pages.json', async () => {
     const root = fixture()
-    const close = await start(root, mode)
+    const { close } = await start(root, mode)
     page(root, 'nested/deep/packages/account/pages/profile.vue')
     await waitForPackages(root, ['nested/deep/packages/account'])
     await close()
@@ -187,6 +219,7 @@ describe('目录监听边界', () => {
 
   it('解绑后共享 Vite watcher 仍可服务其他监听者', async () => {
     const root = fixture()
+    page(root, 'pages/existing.vue')
     const ctx = new PageContext({ dir: 'pages', outDir: '.', dts: false }, root, 'h5')
     await ctx.updatePagesJSON()
     let ready = false
@@ -208,12 +241,24 @@ describe('目录监听边界', () => {
     closers.push(() => server.close())
     ctx.setupViteServer(server)
     await vi.waitFor(() => expect(ready).toBe(true))
+    await vi.waitFor(() => expect(watchedFiles(server.watcher, path.join(root, 'pages'))).toContain('existing.vue'), { timeout: 10000 })
     const onAdd = vi.fn()
     server.watcher.on('add', onAdd)
     await ctx.disposeWatchers()
     const before = fs.readFileSync(path.join(root, 'pages.json'), 'utf8')
     page(root, 'pages/a.vue')
-    await vi.waitFor(() => expect(onAdd).toHaveBeenCalled())
+    await vi.waitFor(() => expect(onAdd).toHaveBeenCalled(), { timeout: 10000 })
     expect(fs.readFileSync(path.join(root, 'pages.json'), 'utf8')).toBe(before)
+  })
+
+  it('独立 build watcher 不监听 pages.json 的临时锁目录', async () => {
+    const root = fixture()
+    const { watcher } = await start(root, 'build')
+    const lockDirectory = path.join(root, 'pages.json.lock')
+    fs.mkdirSync(lockDirectory)
+    fs.writeFileSync(path.join(lockDirectory, 'marker'), '')
+    fs.writeFileSync(path.join(root, 'watch-sentinel.js'), '')
+    await vi.waitFor(() => expect(watchedFiles(watcher, root)).toContain('watch-sentinel.js'), { timeout: 10000 })
+    expect(Object.keys(watcher.getWatched()).map(normalizePath)).not.toContain(normalizePath(lockDirectory))
   })
 })
