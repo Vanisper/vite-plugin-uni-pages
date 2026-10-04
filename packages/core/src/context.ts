@@ -303,7 +303,17 @@ export class PageContext {
     // 声明文件写的是另一个文件（uni-pages.d.ts），不需要和 pages.json
     // 用同一把锁。保持原有行为：不管内容变没变，都在 pages.json 计算
     // 之后运行
-    await this.generateDeclaration()
+    try {
+      await this.generateDeclaration()
+    }
+    catch (error) {
+      // pages.json 已提交，声明失败也不能丢失写入回调和页面更新通知
+      if (result?.updated) {
+        this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
+        this.onUpdate()
+      }
+      throw error
+    }
 
     if (result?.updated) {
       this.options.onAfterWriteFile(this.resolvedPagesJSONPath, result.content)
