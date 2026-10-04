@@ -20,7 +20,7 @@ async function waitTitle(title: string): Promise<void> {
 
 beforeEach(() => {
   vi.stubEnv('UNI_PLATFORM', 'h5')
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-watch-deps-')))
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-watch-deps-')))
   fs.mkdirSync(path.join(root, 'src/pages'), { recursive: true })
   write('package.json', '{"type":"module"}')
   write('src/pages/index.vue', '<template><view/></template>')
@@ -79,8 +79,17 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, sched
     close = () => result.close()
   }
   await readyPromise
-  await settleUpdates()
   expect(watched).toBeDefined()
+  // Vite 5 的缺失 .env 候选会使 chokidar 提前 ready；等待文件实际注册后再写盘
+  await vi.waitFor(() => {
+    const watchedFiles = Object.entries(watched!.getWatched()).flatMap(([directory, files]) =>
+      files.map(file => normalizePath(path.resolve(directory, file))),
+    )
+    const targets = ['pages.config.ts', 'leaf.ts', 'old-leaf.ts', 'src/pages/index.vue'].filter(file => fs.existsSync(path.join(root, file)))
+    for (const file of targets)
+      expect(watchedFiles).toContain(normalizePath(path.join(root, file)))
+  }, { timeout: 10000 })
+  await settleUpdates()
   return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, settleUpdates }
 }
 

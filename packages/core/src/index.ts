@@ -6,6 +6,7 @@ import process from 'node:process'
 import chokidar from 'chokidar'
 import MagicString from 'magic-string'
 import { createLogger, normalizePath } from 'vite'
+import { normalizeConfigPath } from './config-loader'
 import {
   FILE_EXTENSIONS,
   MODULE_ID_VIRTUAL,
@@ -79,9 +80,14 @@ export function VitePluginUniPages(userOptions: UserOptions = {}): Plugin {
         if (config.build.watch) {
           // 必须相对真实的 Vite root 解析：否则 chokidar 会按 process.cwd()
           // 解释相对目录，在 root 与 cwd 不一致时监听到错误的目录
+          const lockDirectory = normalizeConfigPath(`${ctx.resolvedPagesJSONPath}.lock`, config.root)
           buildWatcher = chokidar.watch([...ctx.options.dirs, ...ctx.options.subPackages].map(v => normalizePath(path.resolve(config.root, v))), {
             ignoreInitial: true,
-            ignored: file => normalizePath(file).split('/').some(part => part === 'node_modules' || part === '.git'),
+            ignored: (file) => {
+              const absolute = normalizeConfigPath(file, config.root)
+              return absolute.split('/').some(part => part === 'node_modules' || part === '.git')
+                || absolute === lockDirectory || absolute.startsWith(`${lockDirectory}/`)
+            },
           })
           await ctx.setupWatcher(buildWatcher)
         }

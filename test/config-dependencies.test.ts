@@ -13,7 +13,7 @@ const context = (): PageContext => new PageContext({ dts: false }, root, 'h5')
 const title = (ctx: PageContext): unknown => ctx.pagesGlobConfig?.globalStyle?.navigationBarTitleText
 
 beforeEach(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-config-deps-')))
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-config-deps-')))
   fs.mkdirSync(path.join(root, 'src/pages'), { recursive: true })
   write('src/pages/index.vue', '<template><view/></template>')
   write('package.json', '{"type":"module"}')
