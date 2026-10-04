@@ -3,6 +3,7 @@ import type { UserOptions } from '../packages/core/src'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { parse } from 'comment-json'
 import { build, createServer, normalizePath } from 'vite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -103,7 +104,7 @@ async function start(root: string, mode: 'serve' | 'build', overrides: UserOptio
 }
 
 describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
-  it('发现多级缺失目录，并处理新增、重命名、删除、重建和页面元数据修改', async () => {
+  it('发现多级缺失目录，并处理新增、删除、重建和页面元数据修改', async () => {
     const root = fixture()
     let foundEmptyDirectory = false
     const { events } = await start(root, mode, {
@@ -119,14 +120,10 @@ describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
     await waitForPackages(root, ['nested/deep/packages/account'])
     expect(read(root).subPackages[0].pages[0].path).toBe('pages/profile')
     await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/account/pages/profile.vue'), { timeout: 10000 })
-    // Windows 上扫描句柄可能短暂占用目录；重试仍要求真实重命名成功
-    await vi.waitFor(() => fs.promises.rename(path.join(root, 'nested/deep/packages/account'), path.join(root, 'nested/deep/packages/profile')), { timeout: 5000, interval: 50 })
-    await waitForPackages(root, ['nested/deep/packages/profile'])
-    await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/profile/pages/profile.vue'), { timeout: 10000 })
     await fs.promises.rm(path.join(root, 'nested'), { recursive: true, maxRetries: 10, retryDelay: 50 })
     await waitForPackages(root, [])
     // pages.json 可先由目录事件更新，等待文件删除事件后再开始重建阶段
-    await vi.waitFor(() => expect(events).toContain('unlink:nested/deep/packages/profile/pages/profile.vue'), { timeout: 10000 })
+    await vi.waitFor(() => expect(events).toContain('unlink:nested/deep/packages/account/pages/profile.vue'), { timeout: 10000 })
     events.length = 0
     page(root, 'nested/deep/packages/account/pages/profile.vue', '重建')
     page(root, 'nested/deep/packages/account/pages/detail.vue', '详情')
@@ -141,6 +138,23 @@ describe.each(['serve', 'build'] as const)('%s 真实目录监听', (mode) => {
     await vi.waitFor(() => expect(read(root).subPackages[0].pages.map((page: any) => page.style.navigationBarTitleText).sort()).toEqual(['修改一', '修改二']), { timeout: 10000 })
     page(root, 'main/account/pages/index.vue')
     await vi.waitFor(() => expect(read(root).pages.some((page: any) => page.path === 'main/account/pages/index')).toBe(true))
+  }, 30000)
+
+  it('目录重命名后重新发现分包，Windows 使用 polling 后端', async () => {
+    // Chokidar 原生监听会锁住 Windows 子目录，阻止父目录重命名（上游 #1380）
+    if (process.platform === 'win32')
+      vi.stubEnv('CHOKIDAR_USEPOLLING', 'true')
+    const root = fixture()
+    const { events } = await start(root, mode)
+    page(root, 'nested/deep/packages/account/pages/profile.vue', '改名前')
+    await waitForPackages(root, ['nested/deep/packages/account'])
+    await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/account/pages/profile.vue'), { timeout: 10000 })
+    await fs.promises.rename(path.join(root, 'nested/deep/packages/account'), path.join(root, 'nested/deep/packages/profile'))
+    await waitForPackages(root, ['nested/deep/packages/profile'])
+    expect(read(root).subPackages[0].pages[0].path).toBe('pages/profile')
+    await vi.waitFor(() => expect(events).toContain('add:nested/deep/packages/profile/pages/profile.vue'), { timeout: 10000 })
+    page(root, 'nested/deep/packages/profile/pages/profile.vue', '改名后修改')
+    await vi.waitFor(() => expect(read(root).subPackages[0].pages[0].style.navigationBarTitleText).toBe('改名后修改'), { timeout: 10000 })
   }, 30000)
 
   it('关闭后不再更新 pages.json', async () => {
