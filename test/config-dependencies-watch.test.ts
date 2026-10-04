@@ -19,6 +19,7 @@ async function waitTitle(title: string): Promise<void> {
 }
 
 beforeEach(() => {
+  vi.stubEnv('UNI_PLATFORM', 'h5')
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-watch-deps-')))
   fs.mkdirSync(path.join(root, 'src/pages'), { recursive: true })
   write('package.json', '{"type":"module"}')
@@ -36,8 +37,11 @@ afterEach(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, loads: () => number }> {
-  let loads = 0
+async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, scheduledUpdates: () => number, settleUpdates: () => Promise<void> }> {
+  const updates = vi.spyOn(PageContext.prototype, 'updatePagesJSON')
+  const settleUpdates = async (): Promise<void> => {
+    await Promise.allSettled(updates.mock.results.map(result => result.value))
+  }
   let watched: FSWatcher | undefined
   let ready!: () => void
   const readyPromise = new Promise<void>((resolve) => {
@@ -49,15 +53,13 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, loads
     watched.once('ready', ready)
     return setup.call(this, watcher)
   })
-  const plugin = UniPages({
-    dts: true,
-    onAfterLoadUserConfig: () => { loads++ },
-  })
+  const plugin = UniPages({ dts: true })
   if (mode === 'dev') {
     const server = await createServer({
       root,
       configFile: false,
       plugins: [plugin],
+      css: { postcss: {} },
       server: { middlewareMode: true, hmr: false },
       logLevel: 'silent',
     })
@@ -68,6 +70,7 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, loads
       root,
       configFile: false,
       plugins: [plugin],
+      css: { postcss: {} },
       logLevel: 'silent',
       build: { watch: {}, lib: { entry: path.join(root, 'entry.js'), formats: ['es'] }, minify: false },
     })
@@ -76,15 +79,18 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, loads
     close = () => result.close()
   }
   await readyPromise
+  await settleUpdates()
   expect(watched).toBeDefined()
-  return { watcher: watched!, loads: () => loads }
+  return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, settleUpdates }
 }
 
 describe('真实配置依赖 watcher', () => {
   it.each(['dev', 'build'] as const)('%s 监听依赖变更、切换依赖及删除恢复，并释放监听', async (mode) => {
     fs.mkdirSync(path.join(root, 'node_modules/unused'), { recursive: true })
     write('node_modules/unused/index.js', 'export default {}')
-    const { watcher, loads } = await start(mode)
+    write('old-leaf.ts', `export const suffix = ''`)
+    write('pages.config.ts', `import { title } from './leaf.ts'; import { suffix } from './old-leaf.ts'; export default { globalStyle: { navigationBarTitleText: title + suffix } }`)
+    const { watcher, scheduledUpdates, settleUpdates } = await start(mode)
     await waitTitle('initial')
     expect(Object.keys(watcher.getWatched()).some(directory => normalizePath(directory).includes('/node_modules'))).toBe(false)
     expect(fs.readFileSync(path.join(root, 'uni-pages.d.ts'), 'utf8')).toContain('pages/index')
@@ -93,11 +99,26 @@ describe('真实配置依赖 watcher', () => {
     write('next.json', '{"title":"next"}')
     write('pages.config.ts', `import value from './next.json'; export default { globalStyle: { navigationBarTitleText: value.title } }`)
     await waitTitle('next')
-    const before = loads()
-    const oldEvent = new Promise<void>(resolve => watcher.once('change', () => resolve()))
-    write('leaf.ts', `export const title = 'unused'`)
-    await oldEvent
-    expect(loads()).toBe(before)
+    await settleUpdates()
+    let before = 0
+    let unusedEventUpdates: number | undefined
+    const isUnusedFile = (file: string): boolean => normalizePath(file) === normalizePath(path.join(root, 'old-leaf.ts'))
+    const beforeEvent = (file: string): void => {
+      if (isUnusedFile(file))
+        before = scheduledUpdates()
+    }
+    const afterEvent = (file: string): void => {
+      if (!isUnusedFile(file))
+        return
+      watcher.off('change', beforeEvent)
+      watcher.off('change', afterEvent)
+      unusedEventUpdates = scheduledUpdates() - before
+    }
+    // 只比较当前事件的调度，已排队的初始化或配置生成不会影响断言
+    watcher.prependListener('change', beforeEvent)
+    watcher.on('change', afterEvent)
+    write('old-leaf.ts', `export const suffix = 'unused'`)
+    await vi.waitFor(() => expect(unusedEventUpdates).toBe(0))
     write('next.json', '{"title":"json-updated"}')
     await waitTitle('json-updated')
 
