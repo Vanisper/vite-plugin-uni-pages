@@ -38,7 +38,15 @@ afterEach(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, scheduledUpdates: () => number, settleUpdates: () => Promise<void>, save: (file: string, content: string) => Promise<void> }> {
+interface WatcherSession {
+  watcher: FSWatcher
+  scheduledUpdates: () => number
+  settleUpdates: () => Promise<void>
+  save: (file: string, content: string, stage?: string) => Promise<void>
+  remove: (file: string) => Promise<void>
+}
+
+async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
   const updates = vi.spyOn(PageContext.prototype, 'updatePagesJSON')
   const settleUpdates = async (): Promise<void> => {
     await Promise.allSettled(updates.mock.results.map(result => result.value))
@@ -93,7 +101,7 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, sched
       expect(watchedFiles).toContain(normalizePath(path.join(root, file)))
   }, { timeout: 10000 })
   await settleUpdates()
-  const save = async (file: string, content: string): Promise<void> => {
+  const save = async (file: string, content: string, stage = 'save'): Promise<void> => {
     const absolute = normalizePath(path.join(root, file))
     const previous = lastChanges.get(absolute)
     // chokidar 会丢弃同一文件 50 ms 内的重复 change；模拟两次独立保存
@@ -107,13 +115,31 @@ async function start(mode: 'dev' | 'build'): Promise<{ watcher: FSWatcher, sched
     watched!.on('all', onEvent)
     try {
       write(file, content)
-      await vi.waitFor(() => expect(observed, `watcher event for ${file}`).toBe(true), { timeout: 10000, interval: 10 })
+      await vi.waitFor(() => expect(observed, `${stage}: watcher event for ${file}`).toBe(true), { timeout: 10000, interval: 10 })
     }
     finally {
       watched!.off('all', onEvent)
     }
   }
-  return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, settleUpdates, save }
+  const remove = async (file: string): Promise<void> => {
+    const absolute = normalizePath(path.join(root, file))
+    let observed = false
+    const onUnlink = (filepath: string): void => {
+      if (normalizePath(filepath) === absolute)
+        observed = true
+    }
+    watched!.on('unlink', onUnlink)
+    try {
+      fs.unlinkSync(path.join(root, file))
+      // 加载失败可能先于原生删除事件；确认监听器完成删除后才能重建同一路径
+      await vi.waitFor(() => expect(observed, `unlink event for ${file}`).toBe(true), { timeout: 10000, interval: 10 })
+      await settleUpdates()
+    }
+    finally {
+      watched!.off('unlink', onUnlink)
+    }
+  }
+  return { watcher: watched!, scheduledUpdates: () => updates.mock.calls.length, settleUpdates, save, remove }
 }
 
 describe('真实配置依赖 watcher', () => {
@@ -122,13 +148,13 @@ describe('真实配置依赖 watcher', () => {
     write('node_modules/unused/index.js', 'export default {}')
     write('old-leaf.ts', `export const suffix = ''`)
     write('pages.config.ts', `import { title } from './leaf.ts'; import { suffix } from './old-leaf.ts'; export default { globalStyle: { navigationBarTitleText: title + suffix } }`)
-    const { watcher, scheduledUpdates, settleUpdates, save } = await start(mode)
+    const { watcher, scheduledUpdates, settleUpdates, save, remove } = await start(mode)
     await waitTitle('initial')
     expect(Object.keys(watcher.getWatched()).some(directory => normalizePath(directory).includes('/node_modules'))).toBe(false)
     expect(fs.readFileSync(path.join(root, 'uni-pages.d.ts'), 'utf8')).toContain('pages/index')
     await save('leaf.ts', `export const title = 'changed'`)
     await waitTitle('changed')
-    await save('next.json', '{"title":"next"}')
+    await save('next.json', '{"title":"next"}', 'create JSON dependency')
     await save('pages.config.ts', `import value from './next.json'; export default { globalStyle: { navigationBarTitleText: value.title } }`)
     await waitTitle('next')
     await settleUpdates()
@@ -151,7 +177,7 @@ describe('真实配置依赖 watcher', () => {
     watcher.on('change', afterEvent)
     await save('old-leaf.ts', `export const suffix = 'unused'`)
     await vi.waitFor(() => expect(unusedEventUpdates).toBe(0))
-    await save('next.json', '{"title":"json-updated"}')
+    await save('next.json', '{"title":"json-updated"}', 'update JSON dependency')
     await waitTitle('json-updated')
 
     const logger = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -167,16 +193,16 @@ describe('真实配置依赖 watcher', () => {
         }
       })
     })
-    fs.unlinkSync(path.join(root, 'next.json'))
+    await remove('next.json')
     await failure
     expect(output().globalStyle.navigationBarTitleText).toBe('json-updated')
-    await save('next.json', '{"title":"recovered"}')
+    await save('next.json', '{"title":"recovered"}', 'restore JSON dependency')
     await waitTitle('recovered')
     logger.mockRestore()
 
-    fs.unlinkSync(path.join(root, 'pages.config.ts'))
+    await remove('pages.config.ts')
     await vi.waitFor(() => expect(output().globalStyle).toBeUndefined())
-    await save('pages.config.ts', `export default { globalStyle: { navigationBarTitleText: 'entry-restored' } }`)
+    await save('pages.config.ts', `export default { globalStyle: { navigationBarTitleText: 'entry-restored' } }`, 'restore config entry')
     await waitTitle('entry-restored')
 
     await close!()
