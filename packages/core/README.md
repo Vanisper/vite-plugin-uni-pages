@@ -62,6 +62,31 @@ export default defineUniPages({
 })
 ```
 
+### 配置依赖热更新
+
+`pages.config.ts` 可以拆分为本地模块。开发服务器和 `vite build --watch` 会监听配置入口及其直接、间接依赖；修改依赖后自动重新生成 `pages.json` 和类型声明。
+
+```ts
+// pages.config.ts
+import { defineUniPages } from '@uni-helper/vite-plugin-uni-pages'
+import { globalStyle } from './config/global-style'
+
+export default defineUniPages({ globalStyle })
+```
+
+```ts
+// config/global-style.ts
+export const globalStyle = {
+  navigationBarTitleText: '首页',
+}
+```
+
+支持本地 TypeScript、JavaScript 和 JSON，以及静态 `import`、`export ... from`、字面量 `import()` / `require()` 形成的依赖链。新增导入后会更新监听集合，移除导入后该文件不再触发配置生成。纯类型导入不参与运行时依赖监听。
+
+配置或依赖暂时出现语法错误、缺失文件时，watch 模式保留上次成功的产物并报告错误；修复后继续更新。已加载的配置入口删除后会使用空配置，重建入口后恢复加载。首次加载失败会终止初始化。
+
+计算式动态导入、`fs.readFile()` 等运行时读取、`node_modules` 变更及应用的 `resolve.alias` 不在自动依赖监听范围内。自定义 `configSource.parser` 保持原有调用方式，其自行读取的文件不会自动加入依赖集合；`transform` 和 `rewrite` 的调用顺序保持不变。
+
 ### 页面级配置 definePage
 
 在页面文件的 `<script setup>` 中使用 `definePage` 宏声明页面元数据：

@@ -1,0 +1,207 @@
+import type { PagesConfig } from '@uni-helper/uni-pages-types'
+import type { LoadConfigSource } from 'unconfig'
+import { existsSync, realpathSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { bundleRequire } from 'bundle-require'
+import { loadConfig } from 'unconfig'
+import { normalizePath } from 'vite'
+
+const scriptExtensions = /\.[cm]?[jt]sx?$/
+
+/** 将已存在和暂时缺失的文件统一到同一绝对路径 */
+export function normalizeConfigPath(filepath: string, root: string): string {
+  const absolute = path.resolve(root, normalizePath(filepath))
+  let parent = absolute
+  while (!existsSync(parent) && path.dirname(parent) !== parent)
+    parent = path.dirname(parent)
+  try {
+    return normalizePath(path.join(realpathSync.native(parent), path.relative(parent, absolute)))
+  }
+  catch {
+    return normalizePath(absolute)
+  }
+}
+
+/** 返回可用于监听缺失文件恢复的现存祖先目录 */
+export function configWatchDirectory(filepath: string): string {
+  let directory = path.dirname(filepath)
+  while (!existsSync(directory) && path.dirname(directory) !== directory)
+    directory = path.dirname(directory)
+  return directory
+}
+
+/** 配置加载结果及本次成功求值涉及的文件 */
+interface LoadedPagesConfig {
+  config: PagesConfig
+  sources: string[]
+  dependencies: string[]
+}
+
+/**
+ * 保留 unconfig 的发现与回调契约，以打包后的新模块重新求值本地依赖
+ *
+ * @description 自定义 parser 仍由调用方负责加载；失败路径只用于恢复监听，不替换上次成功配置
+ */
+export class PagesConfigLoader {
+  readonly recoveryPaths = new Set<string>()
+  readonly recoveryDirectories = new Set<string>()
+  private readonly knownSources = new Set<string>()
+
+  constructor(private readonly root: string) {}
+
+  async load(sources: LoadConfigSource<PagesConfig>[]): Promise<LoadedPagesConfig> {
+    const dependencies = new Set<string>()
+    const attemptedPaths = new Set<string>()
+    const normalize = (filepath: string): string => normalizeConfigPath(filepath, this.root)
+    const adapted = sources.map((source): LoadConfigSource<PagesConfig> => {
+      if (typeof source.parser === 'function')
+        return source
+
+      const transformed = new Set<string>()
+      return {
+        ...source,
+        transform: source.transform
+          ? async (code, filepath) => {
+            const result = await source.transform!(code, filepath)
+            if (result)
+              transformed.add(filepath)
+            return result
+          }
+          : undefined,
+        parser: async (filepath) => {
+          attemptedPaths.add(normalize(filepath))
+          const target = transformed.has(filepath)
+            ? path.join(path.dirname(filepath), `__unconfig_${path.basename(filepath)}`)
+            : filepath
+          const parser = source.parser || 'auto'
+          if (parser === 'json')
+            return JSON.parse(await readFile(target, 'utf8'))
+          if (parser === 'auto') {
+            try {
+              return JSON.parse(await readFile(target, 'utf8'))
+            }
+            catch {}
+          }
+          // 未知扩展名继续交给 unconfig，保留调用方自定义扩展的原有加载方式
+          if (!scriptExtensions.test(target)) {
+            const result = await loadConfig<PagesConfig>({ sources: [{ files: target, parser: 'import' }], defaults: {} })
+            return result.config
+          }
+          return this.loadScript(target, filepath, dependencies, attemptedPaths)
+        },
+      }
+    })
+
+    try {
+      const result = await loadConfig<PagesConfig>({ cwd: this.root, sources: adapted, defaults: {} })
+      this.recoveryPaths.clear()
+      this.recoveryDirectories.clear()
+      for (const source of result.sources)
+        this.knownSources.add(normalize(source))
+      // 已加载入口删除后仍监视它的重建；不保留已移出导入图的普通依赖
+      for (const source of this.knownSources) {
+        if (!existsSync(source))
+          dependencies.add(source)
+      }
+      return {
+        config: result.config,
+        sources: result.sources.map(normalize),
+        dependencies: [...dependencies],
+      }
+    }
+    catch (error) {
+      for (const filepath of attemptedPaths)
+        this.recoveryPaths.add(filepath)
+      throw error
+    }
+  }
+
+  private async loadScript(target: string, source: string, dependencies: Set<string>, attempted: Set<string>): Promise<PagesConfig> {
+    const targetPath = normalizeConfigPath(target, this.root)
+    const sourcePath = normalizeConfigPath(source, this.root)
+    const importDirectories = new Set<string>()
+    const toSourcePath = (file: string): string => {
+      const absolute = normalizeConfigPath(file, this.root)
+      return absolute === targetPath ? sourcePath : absolute
+    }
+    try {
+      const { mod, dependencies: inputs } = await bundleRequire<Record<string, unknown>>({
+        filepath: target,
+        cwd: this.root,
+        format: 'esm',
+        tsconfig: false,
+        preserveTemporaryFile: false,
+        // 外部包先按原导入位置解析，避免临时产物改变 node_modules 查找起点
+        notExternal: [/.*/],
+        esbuildOptions: {
+          logLevel: 'silent',
+          target: 'node22',
+          conditions: [],
+          mainFields: ['main'],
+          // ESM 产物中的本地 CJS 依赖仍可调用原生 require
+          banner: { js: `import { createRequire as __uniPagesCreateRequire } from 'node:module'; const require = __uniPagesCreateRequire(import.meta.url);` },
+          plugins: [{
+            name: 'uni-pages-config-inputs',
+            setup(build) {
+              build.onResolve({ filter: /.*/ }, async (args) => {
+                if (args.kind === 'entry-point' || args.pluginData?.resolvingPackage)
+                  return
+                if (args.path.startsWith('.') || path.isAbsolute(args.path)) {
+                  importDirectories.add(normalizeConfigPath(path.dirname(path.resolve(args.resolveDir, args.path)), path.dirname(sourcePath)))
+                  return
+                }
+                const result = await build.resolve(args.path, {
+                  importer: args.importer,
+                  resolveDir: args.resolveDir,
+                  kind: args.kind,
+                  namespace: args.namespace,
+                  pluginData: { resolvingPackage: true },
+                })
+                if (result.errors.length)
+                  return { errors: result.errors, warnings: result.warnings }
+                const isRequire = args.kind === 'require-call' || args.kind === 'require-resolve'
+                return {
+                  path: !isRequire && path.isAbsolute(result.path) ? pathToFileURL(result.path).href : result.path,
+                  external: true,
+                }
+              })
+              // 在执行前保留输入文件；新依赖执行抛错时，修复该文件也能触发重载
+              build.onLoad({ filter: /.*/, namespace: 'file' }, (args) => {
+                attempted.add(toSourcePath(args.path))
+              })
+            },
+          }],
+        },
+      })
+      for (const input of inputs)
+        dependencies.add(toSourcePath(input))
+      // 对齐 jiti 的 default:true 解包，再处理 unconfig 的嵌套 default 对象
+      return unwrapConfig(mod.default ?? mod) as PagesConfig
+    }
+    catch (error) {
+      if (Array.isArray((error as { errors?: unknown })?.errors)) {
+        // 编译失败时临时放宽到导入所在目录，覆盖省略扩展名和目录入口的恢复
+        for (const directory of importDirectories)
+          this.recoveryDirectories.add(directory)
+      }
+      throw error
+    }
+  }
+}
+
+function unwrapConfig(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || !('default' in value) || value.default === null || typeof value.default !== 'object')
+    return value
+  const result = value.default as Record<string, unknown>
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'default' || key in result || item === result)
+      continue
+    try {
+      Object.defineProperty(result, key, { configurable: true, enumerable: true, get: () => (value as Record<string, unknown>)[key] })
+    }
+    catch {}
+  }
+  return result
+}
