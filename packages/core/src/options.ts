@@ -6,8 +6,6 @@ import process from 'node:process'
 import { normalizePath } from 'vite'
 import { resolvePageDirs, resolveSubPackageDirs } from './directories'
 
-export { resolvePageDirs } from './directories'
-
 /**
  * 解析用户配置项
  * 将用户提供的配置与默认值合并，并处理路径解析
