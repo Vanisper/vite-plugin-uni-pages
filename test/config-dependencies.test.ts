@@ -52,6 +52,28 @@ describe('配置本地依赖加载', () => {
     expect(title(ctx)).toBe('after')
   })
 
+  it.each([
+    { name: 'TS 枚举', entry: 'index.ts', files: { 'index.ts': `enum Title { Current = 'before' }; export default { title: Title.Current }` }, changed: 'index.ts' },
+    { name: '无扩展名的间接 TS 导入', entry: 'index.ts', files: { 'index.ts': `import title from './leaf'; export default { title }`, 'leaf.ts': `export default 'before'` }, changed: 'leaf.ts' },
+    { name: 'JSON', entry: 'data.json', files: { 'data.json': '{"title":"before"}' }, changed: 'data.json' },
+    { name: '普通 TS', entry: 'index.ts', files: { 'index.ts': `export default { title: 'before' }` }, changed: 'index.ts' },
+  ])('workspace 包的 $name 参与加载、监听和重新求值', async ({ entry, files, changed }) => {
+    fs.mkdirSync(path.join(root, 'workspace-config'), { recursive: true })
+    fs.mkdirSync(path.join(root, 'node_modules'), { recursive: true })
+    write('workspace-config/package.json', JSON.stringify({ name: 'workspace-config', type: 'module', exports: `./${entry}` }))
+    fs.symlinkSync(path.join(root, 'workspace-config'), path.join(root, 'node_modules/workspace-config'), 'junction')
+    for (const [file, code] of Object.entries(files))
+      write(`workspace-config/${file}`, code!)
+    write('pages.config.ts', `import config from 'workspace-config'; export default { globalStyle: { navigationBarTitleText: config.title } }`)
+    const ctx = context()
+    await ctx.loadUserPagesConfig()
+    expect(title(ctx)).toBe('before')
+    expect(ctx.pagesConfigDependencyPaths).toEqual(expect.arrayContaining(Object.keys(files).map(file => configPath(`workspace-config/${file}`))))
+    write(`workspace-config/${changed}`, files[changed as keyof typeof files]!.replace('before', 'after'))
+    await ctx.loadUserPagesConfig()
+    expect(title(ctx)).toBe('after')
+  })
+
   it('本地模块按自己的位置和导入方式解析外部包', async () => {
     fs.mkdirSync(path.join(root, 'config/node_modules/local-example'), { recursive: true })
     write('config/node_modules/local-example/package.json', JSON.stringify({
@@ -59,15 +81,53 @@ describe('配置本地依赖加载', () => {
       type: 'module',
       exports: { import: './import.js', require: './require.cjs' },
     }))
-    write('config/node_modules/local-example/import.js', `export default 'imported'`)
-    write('config/node_modules/local-example/require.cjs', `module.exports = 'required'`)
-    write('config/leaf.cjs', `module.exports = require('local-example')`)
-    write('config/leaf.ts', `import value from 'local-example'; export default value`)
+    write('config/node_modules/local-example/import.js', `let count = 0; export default () => 'imported' + ++count`)
+    write('config/node_modules/local-example/require.cjs', `let count = 0; module.exports = () => 'required' + ++count`)
+    write('config/leaf.cjs', `module.exports = require('local-example')()`)
+    write('config/leaf.ts', `import value from 'local-example'; export default value()`)
     write('pages.config.ts', `import cjs from './config/leaf.cjs'; import esm from './config/leaf.ts'; export default { globalStyle: { navigationBarTitleText: cjs + '-' + esm } }`)
     const ctx = context()
     await ctx.loadUserPagesConfig()
-    expect(title(ctx)).toBe('required-imported')
+    expect(title(ctx)).toBe('required1-imported1')
+    await ctx.loadUserPagesConfig()
+    expect(title(ctx)).toBe('required2-imported2')
     expect(ctx.pagesConfigDependencyPaths.some(file => file.includes('/node_modules/'))).toBe(false)
+  })
+
+  it('node_modules 中的 TS 包及其相对 JS、TS、JSON 依赖可加载，但不参与监听', async () => {
+    fs.mkdirSync(path.join(root, 'node_modules/local-config'), { recursive: true })
+    write('node_modules/local-config/package.json', JSON.stringify({
+      name: 'local-config',
+      type: 'module',
+      exports: { import: './index.ts', require: './index.cts' },
+    }))
+    write('node_modules/local-config/index.ts', `import { title } from './bridge.js'; export default { title: title + '-import' }`)
+    write('node_modules/local-config/index.cts', `module.exports = { title: require('./leaf.ts').title + '-require' }`)
+    write('node_modules/local-config/bridge.js', `export { title } from './leaf'`)
+    write('node_modules/local-config/leaf.ts', `import data from './data.json'; enum Title { Prefix = 'before' }; export const title = Title.Prefix + data.suffix`)
+    write('node_modules/local-config/data.json', '{"suffix":"-json"}')
+    write('pages.config.ts', `import imported from 'local-config'; const required = require('local-config'); export default { globalStyle: { navigationBarTitleText: imported.title + '/' + required.title } }`)
+    const ctx = context()
+    await ctx.loadUserPagesConfig()
+    expect(title(ctx)).toBe('before-json-import/before-json-require')
+    expect(ctx.pagesConfigDependencyPaths).toEqual([configPath('pages.config.ts')])
+    write('node_modules/local-config/leaf.ts', `throw new Error('package failure'); export const title = 'unused'`)
+    await expect(ctx.loadUserPagesConfig()).rejects.toThrow('package failure')
+    expect(ctx.pagesConfigDependencyPaths).toEqual([configPath('pages.config.ts')])
+    write('node_modules/local-config/leaf.ts', 'export const title =')
+    await expect(ctx.loadUserPagesConfig()).rejects.toThrow()
+    expect(ctx.pagesConfigDependencyPaths).toEqual([configPath('pages.config.ts')])
+  })
+
+  it('node_modules 中的 JSON 包可直接导入，但不参与监听', async () => {
+    fs.mkdirSync(path.join(root, 'node_modules/json-config'), { recursive: true })
+    write('node_modules/json-config/package.json', '{"name":"json-config","exports":"./data.json"}')
+    write('node_modules/json-config/data.json', '{"title":"json-package"}')
+    write('pages.config.ts', `import config from 'json-config'; export default { globalStyle: { navigationBarTitleText: config.title } }`)
+    const ctx = context()
+    await ctx.loadUserPagesConfig()
+    expect(title(ctx)).toBe('json-package')
+    expect(ctx.pagesConfigDependencyPaths).toEqual([configPath('pages.config.ts')])
   })
 
   it.each(['js', 'mjs', 'cjs', 'json'])('本地 %s 依赖更新后，TS 配置读取新值', async (extension) => {

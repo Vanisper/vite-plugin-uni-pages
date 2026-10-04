@@ -10,6 +10,10 @@ import { normalizePath } from 'vite'
 
 const scriptExtensions = /\.[cm]?[jt]sx?$/
 
+function isNodeModulesPath(filepath: string): boolean {
+  return normalizePath(filepath).split('/').includes('node_modules')
+}
+
 /** 将已存在和暂时缺失的文件统一到同一绝对路径 */
 export function normalizeConfigPath(filepath: string, root: string): string {
   const absolute = path.resolve(root, normalizePath(filepath))
@@ -149,7 +153,9 @@ export class PagesConfigLoader {
                 if (args.kind === 'entry-point' || args.pluginData?.resolvingPackage)
                   return
                 if (args.path.startsWith('.') || path.isAbsolute(args.path)) {
-                  importDirectories.add(normalizeConfigPath(path.dirname(path.resolve(args.resolveDir, args.path)), path.dirname(sourcePath)))
+                  const directory = normalizeConfigPath(path.dirname(path.resolve(args.resolveDir, args.path)), path.dirname(sourcePath))
+                  if (!isNodeModulesPath(directory))
+                    importDirectories.add(directory)
                   return
                 }
                 const result = await build.resolve(args.path, {
@@ -161,6 +167,9 @@ export class PagesConfigLoader {
                 })
                 if (result.errors.length)
                   return { errors: result.errors, warnings: result.warnings }
+                // workspace 源码需要重新求值；已安装 TS/JSON 包也需转译，但不参与监听
+                if (path.isAbsolute(result.path) && (!isNodeModulesPath(result.path) || /\.(?:[cm]?tsx?|json)$/.test(result.path)))
+                  return { path: result.path }
                 const isRequire = args.kind === 'require-call' || args.kind === 'require-resolve'
                 return {
                   path: !isRequire && path.isAbsolute(result.path) ? pathToFileURL(result.path).href : result.path,
@@ -169,14 +178,19 @@ export class PagesConfigLoader {
               })
               // 在执行前保留输入文件；新依赖执行抛错时，修复该文件也能触发重载
               build.onLoad({ filter: /.*/, namespace: 'file' }, (args) => {
-                attempted.add(toSourcePath(args.path))
+                const file = toSourcePath(args.path)
+                if (!isNodeModulesPath(file))
+                  attempted.add(file)
               })
             },
           }],
         },
       })
-      for (const input of inputs)
-        dependencies.add(toSourcePath(input))
+      for (const input of inputs) {
+        const file = toSourcePath(input)
+        if (!isNodeModulesPath(file))
+          dependencies.add(file)
+      }
       // 对齐 jiti 的 default:true 解包，再处理 unconfig 的嵌套 default 对象
       return unwrapConfig(mod.default ?? mod) as PagesConfig
     }

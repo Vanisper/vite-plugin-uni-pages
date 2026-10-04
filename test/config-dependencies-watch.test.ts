@@ -47,7 +47,7 @@ interface WatcherSession {
   remove: (file: string) => Promise<void>
 }
 
-async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
+async function start(mode: 'dev' | 'build', extraFiles: string[] = []): Promise<WatcherSession> {
   const updates = vi.spyOn(PageContext.prototype, 'updatePagesJSON')
   const settleUpdates = async (): Promise<void> => {
     await Promise.allSettled(updates.mock.results.map(result => result.value))
@@ -89,7 +89,7 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
     watched.on('raw', (event, file, details) => record('raw', event, file, details?.watchedPath))
     watched.once('ready', ready)
     const result = setup.call(this, watcher)
-    if (mode === 'dev')
+    if (mode === 'dev' && extraFiles.length === 0)
       expect(add).not.toHaveBeenCalled()
     return result
   })
@@ -125,7 +125,7 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
     const watchedFiles = Object.entries(watched!.getWatched()).flatMap(([directory, files]) =>
       files.map(file => normalizePath(path.resolve(directory, file))),
     )
-    const targets = ['pages.config.ts', 'leaf.ts', 'old-leaf.ts', 'src/pages/index.vue'].filter(file => fs.existsSync(path.join(root, file)))
+    const targets = ['pages.config.ts', 'leaf.ts', 'old-leaf.ts', 'src/pages/index.vue', ...extraFiles].filter(file => fs.existsSync(path.join(root, file)))
     for (const file of targets)
       expect(watchedFiles).toContain(normalizePath(path.join(root, file)))
   }, { timeout: 10000 })
@@ -180,6 +180,28 @@ async function start(mode: 'dev' | 'build'): Promise<WatcherSession> {
 }
 
 describe('真实配置依赖 watcher', () => {
+  it.each(['dev', 'build'] as const)('%s 监听根目录外的 workspace 包真实路径', async (mode) => {
+    const workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'uni-pages-workspace-config-')))
+    try {
+      fs.mkdirSync(path.join(root, 'node_modules'), { recursive: true })
+      fs.writeFileSync(path.join(workspace, 'package.json'), '{"name":"workspace-config","type":"module","exports":"./index.ts"}')
+      fs.writeFileSync(path.join(workspace, 'index.ts'), `export { default } from './leaf'`)
+      fs.writeFileSync(path.join(workspace, 'leaf.ts'), `export default { title: 'workspace-initial' }`)
+      fs.symlinkSync(workspace, path.join(root, 'node_modules/workspace-config'), 'junction')
+      write('pages.config.ts', `import config from 'workspace-config'; export default { globalStyle: { navigationBarTitleText: config.title } }`)
+      const leaf = path.relative(root, path.join(workspace, 'leaf.ts'))
+      const { save } = await start(mode, [leaf])
+      await waitTitle('workspace-initial')
+      await save(leaf, `export default { title: 'workspace-updated' }`, 'update workspace dependency')
+      await waitTitle('workspace-updated')
+    }
+    finally {
+      await close?.()
+      close = undefined
+      fs.rmSync(workspace, { recursive: true, force: true })
+    }
+  }, 15000)
+
   it.each(['dev', 'build'] as const)('%s 监听依赖变更、切换依赖及删除恢复，并释放监听', async (mode) => {
     fs.mkdirSync(path.join(root, 'node_modules/unused'), { recursive: true })
     write('node_modules/unused/index.js', 'export default {}')

@@ -83,6 +83,8 @@ export const globalStyle = {
 
 支持本地 TypeScript、JavaScript 和 JSON，以及静态 `import`、`export ... from`、字面量 `import()` / `require()` 形成的依赖链。新增导入后会更新监听集合，移除导入后该文件不再触发配置生成。纯类型导入不参与运行时依赖监听。
 
+通过包名导入 workspace 包时，真实路径位于 `node_modules` 之外的源码也会参与加载、监听和重新求值，包括 Vite 根目录外的文件。已安装包的 TypeScript／JSON 入口及其相对依赖可以加载，但真实路径位于 `node_modules` 内的文件不参与自动监听；普通 JavaScript 包保持原有的 `import`／`require` 条件解析。
+
 配置或依赖暂时出现语法错误、缺失文件时，watch 模式保留上次成功的产物并报告错误；修复后继续更新。已加载的配置入口删除后会使用空配置，重建入口后恢复加载。首次加载失败会终止初始化。
 
 计算式动态导入、`fs.readFile()` 等运行时读取、`node_modules` 变更及应用的 `resolve.alias` 不在自动依赖监听范围内。自定义 `configSource.parser` 保持原有调用方式，其自行读取的文件不会自动加入依赖集合；`transform` 和 `rewrite` 的调用顺序保持不变。
