@@ -268,7 +268,15 @@ describe('真实配置依赖 watcher', () => {
 
     await close!()
     close = undefined
-    expect(Object.keys(watcher.getWatched())).toEqual([])
+    // Chokidar 3 的延迟 stat 失败会在关闭后留下空目录记录，直接验证停止监听的行为
+    for (const event of ['add', 'change', 'unlink'])
+      expect(watcher.listenerCount(event)).toBe(0)
+    const updatesAfterClose = scheduledUpdates()
+    const contentAfterClose = fs.readFileSync(path.join(root, 'src/pages.json'), 'utf8')
+    write('pages.config.ts', `export default { globalStyle: { navigationBarTitleText: 'after-close' } }`)
+    await delay(200)
+    expect(scheduledUpdates()).toBe(updatesAfterClose)
+    expect(fs.readFileSync(path.join(root, 'src/pages.json'), 'utf8')).toBe(contentAfterClose)
   }, 30000)
 
   it.each([
