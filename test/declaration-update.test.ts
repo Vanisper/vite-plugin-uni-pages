@@ -77,7 +77,7 @@ describe('声明生成失败后的页面更新通知', () => {
     const output = parse(fs.readFileSync(path.join(root, 'src/pages.json'), 'utf8')) as any
     expect(output.pages[0].style.navigationBarTitleText).toBe('after')
     expect(onAfterWriteFile).toHaveBeenCalledOnce()
-    expect(onAfterWriteFile).toHaveBeenCalledWith(path.join(root, 'src/pages.json').replace(/\\/g, '/'), expect.stringContaining('after'))
+    expect(onAfterWriteFile).toHaveBeenCalledWith(path.join(root, 'src/pages.json'), expect.stringContaining('after'))
     expect(invalidate).toHaveBeenCalledOnce()
     expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'full-reload' })
     const routes = await server!.ssrLoadModule('virtual:uni-pages')
